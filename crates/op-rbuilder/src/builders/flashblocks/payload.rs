@@ -390,7 +390,10 @@ where
                     });
 
                     let total_block_built_duration = Instant::now();
-                    let build_result = build_block(db, &ctx, &mut info, calculate_state_root);
+                    let should_calculate_state_root =
+                        calculate_state_root || flashblock_count == last_flashblock;
+                    let build_result =
+                        build_block(db, &ctx, &mut info, should_calculate_state_root);
                     ctx.metrics
                         .total_block_built_duration
                         .record(total_block_built_duration.elapsed());
