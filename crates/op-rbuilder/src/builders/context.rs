@@ -1,13 +1,21 @@
 use alloy_consensus::{
-    conditional::BlockConditionalAttributes, Eip658Value, Transaction, TxEip1559,
+    conditional::BlockConditionalAttributes, Eip658Value, Transaction, TxEip1559, TxLegacy
 };
 use alloy_eips::{eip7623::TOTAL_COST_FLOOR_PER_TOKEN, Encodable2718, Typed2718};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_primitives::{Address, Bytes, TxKind, U256, Log};
-// use alloy::{primitives::hex, sol, sol_types::SolCall};
+use alloy::{
+    primitives::address,
+    primitives::Address,
+    primitives::Bytes,
+    primitives::TxKind,
+    primitives::U256,
+    primitives::hex,
+    primitives::fixed_bytes,
+    rpc::types::TransactionRequest};
+use alloy_sol_types::{SolType, SolValue, sol, SolEvent, SolCall};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
-use op_alloy_consensus::{OpDepositReceipt, OpTypedTransaction};
+use op_alloy_consensus::{OpTxEnvelope, OpDepositReceipt, OpTypedTransaction};
 use op_revm::OpSpecId;
 use reth::payload::PayloadBuilderAttributes;
 use reth_basic_payload_builder::PayloadConfig;
@@ -28,17 +36,21 @@ use reth_optimism_txpool::{
     interop::{is_valid_interop, MaybeInteropTransaction},
 };
 use reth_payload_builder::PayloadId;
-use reth_primitives::{Recovered, SealedHeader, Receipt};
+use reth_primitives::{Recovered, SealedHeader};
 use reth_primitives_traits::{InMemorySize, SignedTransaction};
 use reth_provider::ProviderError;
 use reth_revm::{context::Block, State};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
-use revm::{context::result::ResultAndState, Database, DatabaseCommit};
+use revm::{context::result::ResultAndState, Database, DatabaseCommit, context::TxEnv};
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use {vrf::openssl::{CipherSuite, ECVRF}};
 use vrf::VRF;
+use num_bigint::BigUint;
+use std::string::String;
+use sha3::{Digest, Keccak256};
+use op_revm::OpTransaction;
 
 use crate::{
     metrics::OpRBuilderMetrics,
@@ -48,15 +60,23 @@ use crate::{
     tx_signer::Signer,
 };
 
-// defining event structure
-// sol!(
-//    event randomnessRequestEvent(
-//         uint256 callbackGasLimit,
-//         uint256 amountOfRamdomness,
-//         string publicKey,
-//         uint256 seed
-//    );
-// );
+sol! {
+    #[derive(Debug, PartialEq, Eq)]
+    event RandomnessRequestEvent (
+        uint256 callbackGasLimit,
+        uint256 amountOfRamdomness,
+        string publicKey,
+        address randomAddress,
+        uint256 randomnessNonce,
+        uint256 txNonce
+    );
+    contract RandomnessHandler {
+        #[allow(missing_docs)]
+        function randomnessCallback(
+            uint256[] memory randomNumbers,
+            uint256 incrementedNonce) public;
+    }
+}
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -371,7 +391,6 @@ impl OpPayloadBuilderCtx {
 
         // loop is never entered
         while let Some(tx) = best_txs.next(()) {
-            debug!("hello");
             let interop = tx.interop_deadline();
             let reverted_hashes = tx.reverted_hashes().clone();
             let conditional = tx.conditional().cloned();
@@ -476,6 +495,7 @@ impl OpPayloadBuilderCtx {
                     return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
                 }
             };
+            debug!("old tx={:?}", result);
             debug!(
                 "{:?}", result.gas_used()
             );
@@ -522,6 +542,7 @@ impl OpPayloadBuilderCtx {
 
             info.receipts.push(self.build_receipt(ctx, None));
 
+
             // commit changes
             evm.db_mut().commit(state);
 
@@ -534,7 +555,107 @@ impl OpPayloadBuilderCtx {
             // append sender and transaction to the respective lists
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
-            
+
+            // get recently pushed tx receipt
+            let n = info.receipts.len() - 1;
+            // storing log
+            let logs = match &info.receipts[n] {
+                OpReceipt::Eip1559(receipt) => receipt.logs.clone(),
+                _ => Vec::new()
+            };
+
+            let randomness_topic_hex = "0x54e274da5fd76cf9c462d6f614c1f8e93dfb2f3b44ea7b9f8e495ad5a4f88255";
+
+            for log in logs {
+                debug!("tx logs: {:?}", log);
+                let addr = log.address;
+                let topics = log.data.topics();
+                for t in topics {
+                    if t.to_string() == randomness_topic_hex {
+                        let data = log.data.data.clone().to_string();
+                        let decoded_data = hex::decode(data.trim_start_matches("0x").trim()).unwrap();
+
+                        let (callback_gas_limit, 
+                            amount_randomness, 
+                            public_key, 
+                            randomness_address, 
+                            mut randomnessNonce, 
+                            txNonce) = match RandomnessRequestEvent::abi_decode_data(&decoded_data) {
+                            Ok(res) => res,
+                            _ => break
+                        };
+                        let (randomNumbers, incrementedNonce) = generate_randomness(amount_randomness, public_key, randomness_address, randomnessNonce);
+
+                        debug!("random numbers={:?}", randomNumbers);
+                        debug!("address={:?}", randomness_address);
+                        debug!("address conversion={:?}", Address(*randomness_address));
+                        
+                        let calldata = RandomnessHandler::randomnessCallbackCall {
+                            randomNumbers,
+                            incrementedNonce
+                        }.abi_encode();
+
+                        let random_tx = TxLegacy {
+                                to: Address(*randomness_address).into(),
+                                nonce: txNonce.to::<u64>(),
+                                input: calldata.into(),
+                                gas_limit: 1_000_000u64,
+                                gas_price: 20_000_000_000u128,
+                                chain_id: Some(13u64),
+                                value: U256::from(0),
+                        };
+
+                        // convert to typed tx
+                        let typed_tx = OpTypedTransaction::Legacy(random_tx);
+
+                        let secret = fixed_bytes!("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
+                        let signer = Signer::try_from_secret(secret).expect("signer creation");
+                        let signed_tx = signer.sign_tx(typed_tx).unwrap();
+
+                        // execute tx
+                        let r = match evm.transact(&signed_tx) {
+                            Ok(res) => res,
+                            Err(err) => {
+                                if let Some(err) = err.as_invalid_tx_err() {
+                                   panic!("{:?}", err);
+                                }
+                                // this is an error that we should treat as fatal for this attempt
+                                log_txn(TxnExecutionResult::EvmError);
+                                return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
+                            }
+                        };
+
+                        debug!("transaction result: {:?}", r.result);
+                        debug!("transaction state: {:?}", r.state);
+                        let gas_used = r.result.gas_used();
+                        info.cumulative_gas_used += gas_used;
+                        // record tx da size
+                        info.cumulative_da_bytes_used += tx_da_size;
+
+                        // Does result contain transaction logs?
+                        // Push transaction changeset and calculate header bloom filter for receipt.
+                        let ctx = ReceiptBuilderCtx {
+                            tx: signed_tx.inner(),
+                            evm: &evm,
+                            result: r.result,
+                            state: &r.state,
+                            cumulative_gas_used: info.cumulative_gas_used,
+                        };
+
+
+                        info.receipts.push(self.build_receipt(ctx, None));
+                        evm.db_mut().commit(r.state);
+
+                        // append sender and transaction to the respective lists
+                        info.executed_senders.push(signed_tx.signer());
+                        info.executed_transactions.push(signed_tx.into_inner());
+                        
+
+                    }
+                }
+            }
+
+
         }
 
         self.metrics
@@ -555,33 +676,6 @@ impl OpPayloadBuilderCtx {
         self.metrics
             .bundles_reverted
             .record(num_bundles_reverted as f64);
-
-        // check if randomness event was emitted by checking for appropriate topic hash
-        // if randomness topic hash found create vrf hash output using witnet vrf
-        // (?) create new transaction and send back to randomness
-        // q's:
-        //      how is a new transaction created through op-rbuilder
-        //      how to deploy a contract to builder playground to view log
-
-        // get recently pushed tx receipt
-        let n = info.receipts.len() - 1;
-        // storing log
-        let logs = match &info.receipts[n] {
-            OpReceipt::Eip1559(receipt) => receipt.logs.clone(),
-            _ => Vec::new()
-        };
-
-        for log in logs {
-            let topics = log.data.topics();
-            let address = log.address;
-            let data = log.data.data.clone();
-
-            debug!("log data: addr={:?} topics={:?} data={:?}",
-                address.to_string(),
-                topics,
-                data
-            );
-        }
 
         debug!(
             target: "payload_builder",
@@ -739,20 +833,40 @@ where
 }
 
 pub fn generate_randomness(
-    amountOfRandomness: u64,
-    key: String,
-    seed: u64
-) -> Vec<u8> {
+    amountOfRandomness: U256,
+    pubKey: String,
+    randomnessAddress: Address,
+    mut nonce: U256
+) -> (Vec<U256>, U256) {
+
+    let mut random_numbers = Vec::new();
+    let secret_key = hex::decode(pubKey).unwrap();
     let mut vrf = ECVRF::from_suite(CipherSuite::SECP256K1_SHA256_TAI).unwrap();
-    let secret_key = hex::decode(key).unwrap();
     let public_key = vrf.derive_public_key(&secret_key).unwrap();
-    let seed = seed.to_string();
-    let message: &[u8] = seed.as_bytes();
 
-    let pi = vrf.prove(&secret_key, &message).unwrap();
-    let hash = vrf.proof_to_hash(&pi).unwrap();
+    for _ in 0..amountOfRandomness.to::<u64>() {
+        let addr_and_nonce: (Address, U256) = (randomnessAddress, nonce);
+        let encoded_data = <(Address, U256) as SolValue>::abi_encode(&addr_and_nonce);
+        let seed = keccak256(&encoded_data);
 
-    let hash_output = vrf.verify(&public_key, &pi, &message);
+        let message: &[u8] = &seed;
 
-    return hash_output.unwrap();
+        let pi = vrf.prove(&secret_key, &message).unwrap();
+        let hash_output = vrf.verify(&public_key, &pi, &message);
+
+        let number = BigUint::from_bytes_be(&hash_output.unwrap()).to_string();
+        let number = number.parse::<U256>().unwrap();
+
+        random_numbers.push(number);
+
+        nonce += U256::from(1);
+    }
+
+    (random_numbers, nonce)
+}
+
+fn keccak256(input: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(input);
+    hasher.finalize().into()
 }
