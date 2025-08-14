@@ -7,7 +7,7 @@ use core::{
 };
 use futures::{Sink, SinkExt};
 use futures_util::StreamExt;
-use rollup_boost::primitives::FlashblocksPayloadV1;
+use rollup_boost::FlashblocksPayloadV1;
 use std::{io, net::TcpListener, sync::Arc};
 use tokio::{
     net::TcpStream,
@@ -21,7 +21,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, Utf8Bytes},
     WebSocketStream,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::metrics::OpRBuilderMetrics;
 
@@ -62,18 +62,26 @@ impl WebSocketPublisher {
         })
     }
 
-    pub fn publish(&self, payload: &FlashblocksPayloadV1) -> io::Result<()> {
+    pub fn publish(&self, payload: &FlashblocksPayloadV1) -> io::Result<usize> {
         // Serialize the payload to a UTF-8 string
         // serialize only once, then just copy around only a pointer
         // to the serialized data for each subscription.
+        debug!(
+            target: "payload_builder",
+            message = "Sending flashblock to rollup-boost",
+            payload_id = payload.payload_id.to_string(),
+            index = payload.index,
+            base = payload.base.is_some(),
+        );
+
         let serialized = serde_json::to_string(payload)?;
         let utf8_bytes = Utf8Bytes::from(serialized);
-
+        let size = utf8_bytes.len();
         // Send the serialized payload to all subscribers
         self.pipe
             .send(utf8_bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::ConnectionAborted, e))?;
-        Ok(())
+        Ok(size)
     }
 }
 
@@ -188,7 +196,7 @@ async fn broadcast_loop(
                     sent.fetch_add(1, Ordering::Relaxed);
                     metrics.messages_sent_count.increment(1);
 
-                    tracing::info!("Broadcasted payload: {:?}", payload);
+                    tracing::debug!("Broadcasted payload: {:?}", payload);
                     if let Err(e) = stream.send(Message::Text(payload)).await {
                         tracing::debug!("Closing flashblocks subscription for {peer_addr}: {e}");
                         break; // Exit the loop if sending fails

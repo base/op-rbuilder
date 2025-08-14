@@ -9,15 +9,18 @@ use reth_optimism_payload_builder::config::OpDAConfig;
 
 use crate::{
     args::OpRbuilderArgs,
+    flashtestations::args::FlashtestationsArgs,
     traits::{NodeBounds, PoolBounds},
     tx_signer::Signer,
 };
 
+mod builder_tx;
 mod context;
 mod flashblocks;
 mod generator;
 mod standard;
 
+pub use builder_tx::BuilderTx;
 pub use flashblocks::FlashblocksBuilder;
 pub use standard::StandardBuilder;
 
@@ -73,8 +76,12 @@ pub struct BuilderConfig<Specific: Clone> {
     /// opt-out of revert protection.
     pub revert_protection: bool,
 
+    /// When enabled, this will invoke the flashtestions workflow. This involves a
+    /// bootstrapping step that generates a new pubkey for the TEE service
+    pub flashtestations_config: FlashtestationsArgs,
+
     /// The interval at which blocks are added to the chain.
-    /// This is also the frequency at which the builder will be receiving FCU rquests from the
+    /// This is also the frequency at which the builder will be receiving FCU requests from the
     /// sequencer.
     pub block_time: Duration,
 
@@ -100,8 +107,13 @@ pub struct BuilderConfig<Specific: Clone> {
     // (not just 0.5s) because of that.
     pub block_time_leeway: Duration,
 
+    /// Inverted sampling frequency in blocks. 1 - each block, 100 - every 100th block.
+    pub sampling_ratio: u64,
+
     /// Configuration values that are specific to the block builder implementation used.
     pub specific: Specific,
+    /// Maximum gas a transaction can use before being excluded.
+    pub max_gas_per_txn: Option<u64>,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -115,6 +127,7 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
                 },
             )
             .field("revert_protection", &self.revert_protection)
+            .field("flashtestations", &self.flashtestations_config)
             .field("block_time", &self.block_time)
             .field("block_time_leeway", &self.block_time_leeway)
             .field("da_config", &self.da_config)
@@ -128,10 +141,13 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
         Self {
             builder_signer: None,
             revert_protection: false,
+            flashtestations_config: FlashtestationsArgs::default(),
             block_time: Duration::from_secs(2),
             block_time_leeway: Duration::from_millis(500),
             da_config: OpDAConfig::default(),
             specific: S::default(),
+            sampling_ratio: 100,
+            max_gas_per_txn: None,
         }
     }
 }
@@ -146,14 +162,18 @@ where
         Ok(Self {
             builder_signer: args.builder_signer,
             revert_protection: args.enable_revert_protection,
+            flashtestations_config: args.flashtestations.clone(),
             block_time: Duration::from_millis(args.chain_block_time),
             block_time_leeway: Duration::from_secs(args.extra_block_deadline_secs),
             da_config: Default::default(),
+            sampling_ratio: args.telemetry.sampling_ratio,
+            max_gas_per_txn: args.max_gas_per_txn,
             specific: S::try_from(args)?,
         })
     }
 }
 
+#[expect(clippy::infallible_try_from)]
 impl TryFrom<OpRbuilderArgs> for () {
     type Error = Infallible;
 

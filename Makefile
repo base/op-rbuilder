@@ -31,6 +31,10 @@ build: ## Build (debug version)
 op-rbuilder: ## Build op-rbuilder (debug version)
 	cargo build -p op-rbuilder --bin op-rbuilder --features "$(FEATURES)"
 
+.PHONY: tdx-quote-provider
+tdx-quote-provider: ## Build tdx-quote-provider (debug version)
+	cargo build -p tdx-quote-provider --bin tdx-quote-provider --features "$(FEATURES)"
+
 .PHONY: tester
 tester: ## Build tester (debug version)
 	cargo build -p op-rbuilder --bin tester --features "testing,$(FEATURES)"
@@ -44,13 +48,13 @@ docker-image-rbuilder: ## Build a rbuilder Docker image
 .PHONY: lint
 lint: ## Run the linters
 	cargo +nightly fmt -- --check
-	cargo +nightly clippy --features "$(FEATURES)" -- -D warnings
-	cargo +nightly clippy -p op-rbuilder --features "$(FEATURES)" -- -D warnings
+	cargo +nightly clippy --all-features -- -D warnings
 
 .PHONY: test
 test: ## Run the tests for rbuilder and op-rbuilder
 	cargo test --verbose --features "$(FEATURES)"
 	cargo test -p op-rbuilder --verbose --features "$(FEATURES)"
+	cargo test -p tdx-quote-provider --verbose --features "$(FEATURES)"
 
 .PHONY: lt
 lt: lint test ## Run "lint" and "test"
@@ -58,9 +62,8 @@ lt: lint test ## Run "lint" and "test"
 .PHONY: fmt
 fmt: ## Format the code
 	cargo +nightly fmt
-	cargo +nightly fix --allow-staged
-	cargo +nightly clippy --features "$(FEATURES)" --fix --allow-staged
-	cargo +nightly clippy -p op-rbuilder --features "$(FEATURES)" --fix --allow-staged
+	cargo +nightly clippy --all-features --fix --allow-staged --allow-dirty
+	cargo +nightly fix --allow-staged --allow-dirty
 
 .PHONY: bench
 bench: ## Run benchmarks

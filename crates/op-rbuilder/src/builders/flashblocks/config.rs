@@ -12,25 +12,36 @@ pub struct FlashblocksConfig {
     /// new flashblocks updates.
     pub ws_addr: SocketAddr,
 
-    /// The time allocated to build a flashblock
-    pub flashblocks_per_block: u64,
+    /// Should we calculate state root for each flashblock
+    pub calculate_state_root: bool,
 
     /// How often a flashblock is produced. This is independent of the block time of the chain.
     /// Each block will contain one or more flashblocks. On average, the number of flashblocks
     /// per block is equal to the block time divided by the flashblock interval.
-    pub build_interval: Duration,
+    pub interval: Duration,
 
-    /// Should we calculate state root for each flashblock
-    pub calculate_state_root: bool,
+    /// How much time would be deducted from block build time to account for latencies in
+    /// milliseconds.
+    ///
+    /// If dynamic_adjustment is false this value would be deducted from first flashblock and
+    /// it shouldn't be more than interval
+    ///
+    /// If dynamic_adjustment is true this value would be deducted from first flashblock and
+    /// it shouldn't be more than interval
+    pub leeway_time: Duration,
+
+    /// Disables dynamic flashblocks number adjustment based on FCU arrival time
+    pub fixed: bool,
 }
 
 impl Default for FlashblocksConfig {
     fn default() -> Self {
         Self {
             ws_addr: SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 1111),
-            build_interval: Duration::from_millis(225),
-            flashblocks_per_block: 10,
             calculate_state_root: true,
+            interval: Duration::from_millis(250),
+            leeway_time: Duration::from_millis(50),
+            fixed: false,
         }
     }
 }
@@ -44,21 +55,29 @@ impl TryFrom<OpRbuilderArgs> for FlashblocksConfig {
             args.flashblocks.flashblocks_port,
         );
 
-        let build_interval = Duration::from_millis(
-            (args.chain_block_time - args.flashblocks.flashblocks_block_overhead)
-                / args.flashblocks.flashblocks_per_block,
-        );
+        let leeway_time = Duration::from_millis(args.flashblocks.flashblocks_leeway_time);
 
-        info!(
-            "Flashblocks parameters builder_interval={}",
-            build_interval.as_millis()
-        );
+        let fixed = args.flashblocks.flashblocks_fixed;
 
         Ok(Self {
             ws_addr,
-            build_interval,
-            flashblocks_per_block: args.flashblocks.flashblocks_per_block,
             calculate_state_root: args.flashblocks.flashblocks_calculate_state_root,
+            interval,
+            leeway_time,
+            fixed,
         })
+    }
+}
+
+pub trait FlashBlocksConfigExt {
+    fn flashblocks_per_block(&self) -> u64;
+}
+
+impl FlashBlocksConfigExt for BuilderConfig<FlashblocksConfig> {
+    fn flashblocks_per_block(&self) -> u64 {
+        if self.block_time.as_millis() == 0 {
+            return 0;
+        }
+        (self.block_time.as_millis() / self.specific.interval.as_millis()) as u64
     }
 }

@@ -1,49 +1,84 @@
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
-use alloy_consensus::{
-    conditional::BlockConditionalAttributes, BlobTransactionSidecar, BlobTransactionValidationError,
-};
-use alloy_eips::{eip7702::SignedAuthorization, Typed2718};
+use alloy_consensus::{conditional::BlockConditionalAttributes, BlobTransactionValidationError};
+use alloy_eips::{eip7594::BlobTransactionSidecarVariant, eip7702::SignedAuthorization, Typed2718};
 use alloy_primitives::{Address, Bytes, TxHash, TxKind, B256, U256};
 use alloy_rpc_types_eth::{erc4337::TransactionConditional, AccessList};
 use reth_optimism_primitives::OpTransactionSigned;
 use reth_optimism_txpool::{
     conditional::MaybeConditionalTransaction, estimated_da_size::DataAvailabilitySized,
-    interop::MaybeInteropTransaction, OpPooledTransaction,
+    interop::MaybeInteropTransaction, OpPooledTransaction, OpPooledTx,
 };
 use reth_primitives::{kzg::KzgSettings, Recovered};
 use reth_primitives_traits::InMemorySize;
 use reth_transaction_pool::{EthBlobTransactionSidecar, EthPoolTransaction, PoolTransaction};
 
 pub trait FBPoolTransaction:
-    EthPoolTransaction
-    + MaybeInteropTransaction
-    + MaybeConditionalTransaction
-    + DataAvailabilitySized
-    + MaybeRevertingTransaction
+    MaybeRevertingTransaction + OpPooledTx + MaybeFlashblockFilter
 {
 }
 
 #[derive(Clone, Debug)]
 pub struct FBPooledTransaction {
     pub inner: OpPooledTransaction,
-    pub exclude_reverting_txs: bool,
+
+    /// reverted hashes for the transaction. If the transaction is a bundle,
+    /// this is the list of hashes of the transactions that reverted. If the
+    /// transaction is not a bundle, this is `None`.
+    pub reverted_hashes: Option<Vec<B256>>,
+
+    pub flashblock_number_min: Option<u64>,
+    pub flashblock_number_max: Option<u64>,
 }
 
 impl FBPoolTransaction for FBPooledTransaction {}
 
+impl OpPooledTx for FBPooledTransaction {
+    fn encoded_2718(&self) -> Cow<'_, Bytes> {
+        Cow::Borrowed(self.inner.encoded_2718())
+    }
+}
+
 pub trait MaybeRevertingTransaction {
-    fn set_exclude_reverting_txs(&mut self, exclude: bool);
-    fn exclude_reverting_txs(&self) -> bool;
+    fn with_reverted_hashes(self, reverted_hashes: Vec<B256>) -> Self;
+    fn reverted_hashes(&self) -> Option<Vec<B256>>;
 }
 
 impl MaybeRevertingTransaction for FBPooledTransaction {
-    fn set_exclude_reverting_txs(&mut self, exclude: bool) {
-        self.exclude_reverting_txs = exclude;
+    fn with_reverted_hashes(mut self, reverted_hashes: Vec<B256>) -> Self {
+        self.reverted_hashes = Some(reverted_hashes);
+        self
     }
 
-    fn exclude_reverting_txs(&self) -> bool {
-        self.exclude_reverting_txs
+    fn reverted_hashes(&self) -> Option<Vec<B256>> {
+        self.reverted_hashes.clone()
+    }
+}
+
+pub trait MaybeFlashblockFilter {
+    fn with_flashblock_number_min(self, flashblock_number_min: Option<u64>) -> Self;
+    fn with_flashblock_number_max(self, flashblock_number_max: Option<u64>) -> Self;
+    fn flashblock_number_min(&self) -> Option<u64>;
+    fn flashblock_number_max(&self) -> Option<u64>;
+}
+
+impl MaybeFlashblockFilter for FBPooledTransaction {
+    fn with_flashblock_number_min(mut self, flashblock_number_min: Option<u64>) -> Self {
+        self.flashblock_number_min = flashblock_number_min;
+        self
+    }
+
+    fn with_flashblock_number_max(mut self, flashblock_number_max: Option<u64>) -> Self {
+        self.flashblock_number_max = flashblock_number_max;
+        self
+    }
+
+    fn flashblock_number_min(&self) -> Option<u64> {
+        self.flashblock_number_min
+    }
+
+    fn flashblock_number_max(&self) -> Option<u64> {
+        self.flashblock_number_max
     }
 }
 
@@ -71,7 +106,9 @@ impl PoolTransaction for FBPooledTransaction {
         let inner = OpPooledTransaction::from_pooled(tx);
         Self {
             inner,
-            exclude_reverting_txs: false,
+            reverted_hashes: None,
+            flashblock_number_min: None,
+            flashblock_number_max: None,
         }
     }
 
@@ -179,21 +216,21 @@ impl EthPoolTransaction for FBPooledTransaction {
 
     fn try_into_pooled_eip4844(
         self,
-        sidecar: Arc<BlobTransactionSidecar>,
+        sidecar: Arc<BlobTransactionSidecarVariant>,
     ) -> Option<Recovered<Self::Pooled>> {
         self.inner.try_into_pooled_eip4844(sidecar)
     }
 
     fn try_from_eip4844(
         _tx: Recovered<Self::Consensus>,
-        _sidecar: BlobTransactionSidecar,
+        _sidecar: BlobTransactionSidecarVariant,
     ) -> Option<Self> {
         None
     }
 
     fn validate_blob(
         &self,
-        _sidecar: &BlobTransactionSidecar,
+        _sidecar: &BlobTransactionSidecarVariant,
         _settings: &KzgSettings,
     ) -> Result<(), BlobTransactionValidationError> {
         Err(BlobTransactionValidationError::NotBlobTransaction(
@@ -221,9 +258,7 @@ impl MaybeInteropTransaction for FBPooledTransaction {
 
 impl DataAvailabilitySized for FBPooledTransaction {
     fn estimated_da_size(&self) -> u64 {
-        // Downscaled by 1e6 to be compliant with op-geth estimate size function
-        // https://github.com/ethereum-optimism/op-geth/blob/optimism/core/types/rollup_cost.go#L563
-        op_alloy_flz::tx_estimated_size_fjord(self.inner.encoded_2718()).wrapping_div(1_000_000)
+        self.inner.estimated_da_size()
     }
 }
 
@@ -231,7 +266,9 @@ impl From<OpPooledTransaction> for FBPooledTransaction {
     fn from(tx: OpPooledTransaction) -> Self {
         Self {
             inner: tx,
-            exclude_reverting_txs: false,
+            reverted_hashes: None,
+            flashblock_number_min: None,
+            flashblock_number_max: None,
         }
     }
 }
@@ -255,7 +292,9 @@ impl MaybeConditionalTransaction for FBPooledTransaction {
     {
         FBPooledTransaction {
             inner: self.inner.with_conditional(conditional),
-            exclude_reverting_txs: self.exclude_reverting_txs,
+            reverted_hashes: self.reverted_hashes,
+            flashblock_number_min: None,
+            flashblock_number_max: None,
         }
     }
 }

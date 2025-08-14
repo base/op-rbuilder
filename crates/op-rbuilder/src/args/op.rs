@@ -3,13 +3,16 @@
 //! Copied from OptimismNode to allow easy extension.
 
 //! clap [Args](clap::Args) for optimism rollup configuration
+
+use crate::{flashtestations::args::FlashtestationsArgs, tx_signer::Signer};
+use anyhow::{anyhow, Result};
+use clap::Parser;
+use reth_optimism_cli::commands::Commands;
+use reth_optimism_node::args::RollupArgs;
 use std::path::PathBuf;
 
-use crate::tx_signer::Signer;
-use reth_optimism_node::args::RollupArgs;
-
 /// Parameters for rollup configuration
-#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 #[command(next_help_heading = "Rollup")]
 pub struct OpRbuilderArgs {
     /// Rollup configuration
@@ -27,6 +30,10 @@ pub struct OpRbuilderArgs {
     )]
     pub chain_block_time: u64,
 
+    /// max gas a transaction can use
+    #[arg(long = "builder.max_gas_per_txn")]
+    pub max_gas_per_txn: Option<u64>,
+
     /// Signals whether to log pool transaction events
     #[arg(long = "builder.log-pool-transactions", default_value = "false")]
     pub log_pool_transactions: bool,
@@ -38,6 +45,7 @@ pub struct OpRbuilderArgs {
     #[arg(long = "builder.enable-revert-protection", default_value = "false")]
     pub enable_revert_protection: bool,
 
+    /// Path to builder playgorund to automatically start up the node connected to it
     #[arg(
         long = "builder.playground",
         num_args = 0..=1,
@@ -46,24 +54,37 @@ pub struct OpRbuilderArgs {
         env = "PLAYGROUND_DIR",
     )]
     pub playground: Option<PathBuf>,
-
     #[command(flatten)]
     pub flashblocks: FlashblocksArgs,
+    #[command(flatten)]
+    pub telemetry: TelemetryArgs,
+    #[command(flatten)]
+    pub flashtestations: FlashtestationsArgs,
 }
 
-fn expand_path(s: &str) -> Result<PathBuf, String> {
+impl Default for OpRbuilderArgs {
+    fn default() -> Self {
+        let args = crate::args::Cli::parse_from(["dummy", "node"]);
+        let Commands::Node(node_command) = args.command else {
+            unreachable!()
+        };
+        node_command.ext
+    }
+}
+
+fn expand_path(s: &str) -> Result<PathBuf> {
     shellexpand::full(s)
-        .map_err(|e| format!("expansion error for `{s}`: {e}"))?
+        .map_err(|e| anyhow!("expansion error for `{s}`: {e}"))?
         .into_owned()
         .parse()
-        .map_err(|e| format!("invalid path after expansion: {e}"))
+        .map_err(|e| anyhow!("invalid path after expansion: {e}"))
 }
 
 /// Parameters for Flashblocks configuration
 /// The names in the struct are prefixed with `flashblocks` to avoid conflicts
 /// with the standard block building configuration since these args are flattened
 /// into the main `OpRbuilderArgs` struct with the other rollup/node args.
-#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct FlashblocksArgs {
     /// When set to true, the builder will build flashblocks
     /// and will build standard blocks at the chain block time.
@@ -116,4 +137,63 @@ pub struct FlashblocksArgs {
         env = "FLASHBLOCKS_CALCULATE_STATE_ROOT"
     )]
     pub flashblocks_calculate_state_root: bool,
+
+    /// Time for each flashblock in milliseconds
+    #[arg(
+        long = "flashblocks.block-time",
+        default_value = "1000",
+        env = "FLASHBLOCK_BLOCK_TIME"
+    )]
+    pub flashblocks_block_time: u64,
+
+    /// Builder would always thry to produce fixed number of flashblocks without regard to time of
+    /// FCU arrival.
+    /// In cases of late FCU it could lead to partially filled blocks.
+    #[arg(
+        long = "flashblocks.fixed",
+        default_value = "false",
+        env = "FLASHBLOCK_FIXED"
+    )]
+    pub flashblocks_fixed: bool,
+
+    /// Time by which blocks would be completed earlier in milliseconds.
+    ///
+    /// This time used to account for latencies, this time would be deducted from total block
+    /// building time before calculating number of fbs.
+    #[arg(
+        long = "flashblocks.leeway-time",
+        default_value = "75",
+        env = "FLASHBLOCK_LEEWAY_TIME"
+    )]
+    pub flashblocks_leeway_time: u64,
+}
+
+impl Default for FlashblocksArgs {
+    fn default() -> Self {
+        let args = crate::args::Cli::parse_from(["dummy", "node"]);
+        let Commands::Node(node_command) = args.command else {
+            unreachable!()
+        };
+        node_command.ext.flashblocks
+    }
+}
+
+/// Parameters for telemetry configuration
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+pub struct TelemetryArgs {
+    /// OpenTelemetry endpoint for traces
+    #[arg(long = "telemetry.otlp-endpoint", env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
+    pub otlp_endpoint: Option<String>,
+
+    /// OpenTelemetry headers for authentication
+    #[arg(long = "telemetry.otlp-headers", env = "OTEL_EXPORTER_OTLP_HEADERS")]
+    pub otlp_headers: Option<String>,
+
+    /// Inverted sampling frequency in blocks. 1 - each block, 100 - every 100th block.
+    #[arg(
+        long = "telemetry.sampling-ratio",
+        env = "SAMPLING_RATIO",
+        default_value = "100"
+    )]
+    pub sampling_ratio: u64,
 }

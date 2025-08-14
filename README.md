@@ -1,6 +1,6 @@
 # op-rbuilder
 
-[![CI status](https://github.com/flashbots/op-rbuilder/actions/workflows/checks.yaml/badge.svg?branch=develop)](https://github.com/flashbots/op-rbuilder/actions/workflows/integration.yaml)
+[![CI status](https://github.com/flashbots/op-rbuilder/actions/workflows/checks.yaml/badge.svg)](https://github.com/flashbots/op-rbuilder/actions)
 
 `op-rbuilder` is a Rust-based block builder designed to build blocks for the Optimism stack.
 
@@ -27,6 +27,41 @@ To build the op-rbuilder, run:
 cargo build -p op-rbuilder --bin op-rbuilder
 ```
 
+### Flashblocks
+
+To run op-rbuilder with flashblocks:
+
+```bash
+cargo run -p op-rbuilder --bin op-rbuilder -- node \
+    --chain /path/to/chain-config.json \
+    --http \
+    --authrpc.port 9551 \
+    --authrpc.jwtsecret /path/to/jwt.hex \
+    --flashblocks.enabled \
+    --flashblocks.port 1111 \ # port to bind ws that provides flashblocks 
+    --flashblocks.addr 127.0.0.1 # address to bind the ws that provides flashblocks
+```
+
+### Flashtestations 
+
+To run op-rbuilder with flashtestations:
+
+```bash
+cargo run -p op-rbuilder --bin op-rbuilder --features=flashtestations -- node \
+    --chain /path/to/chain-config.json \
+    --http \
+    --authrpc.port 9551 \
+    --authrpc.jwtsecret /path/to/jwt.hex \
+    --flashtestations.enabled \
+    --flashtestations.rpc-url your-rpc-url \ # rpc to submit the attestation transaction to
+    --flashtestations.funding-amount 0.01 \ # amount in ETH to fund the TEE generated key
+    --flashtestations.funding-key secret-key \ # funding key for the TEE key
+    --flashtestations.registry-address 0xFlashtestationsRegistryAddress \
+    flashtestations.builder-policy-address 0xBuilderPolicyAddress
+```
+
+Note that `--rollup.builder-secret-key` must be set and funded in order for the flashtestations key to be funded and submit the attestation on-chain.
+
 ## Observability
 
 To verify whether a builder block has landed on-chain, you can add the `--rollup.builder-secret-key` flag or `BUILDER_SECRET_KEY` environment variable.
@@ -46,7 +81,13 @@ To see the full list of op-rbuilder metrics, see [`src/metrics.rs`](./src/metric
 
 op-rbuilder has an integration test framework that runs the builder against mock engine api payloads and ensures that the builder produces valid blocks.
 
-To run the integration tests, run:
+You can run the tests using the command
+
+```bash
+just run-tests
+```
+
+or the following sequence:
 
 ```bash
 # Ensure you have op-reth installed in your path,
@@ -60,7 +101,7 @@ cargo run -p op-rbuilder --features="testing" --bin tester -- genesis --output g
 cargo build -p op-rbuilder --bin op-rbuilder
 
 # Run the integration tests
-cargo test --package op-rbuilder --lib --features integration -- integration::integration_test::tests
+cargo test --package op-rbuilder --lib
 ```
 
 ## Local Devnet
@@ -89,25 +130,16 @@ cargo run -p op-rbuilder --bin op-rbuilder -- node \
     --port 30333 --disable-discovery \
     --metrics 127.0.0.1:9011 \
     --rollup.builder-secret-key ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-    --trusted-peers enode://3479db4d9217fb5d7a8ed4d61ac36e120b05d36c2eefb795dc42ff2e971f251a2315f5649ea1833271e020b9adc98d5db9973c7ed92d6b2f1f2223088c3d852f@127.0.0.1:30304
+    --trusted-peers enode://79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8@127.0.0.1:30304
 ```
 
-4. Init `contender`:
+4. Run `contender`:
 
 ```bash
-git clone https://github.com/flashbots/contender
-cd contender
-cargo run -- setup ./scenarios/simple.toml -r http://localhost:2222
-```
-
-6. Run `contender`:
-
-```bash
-cargo run -- spam ./scenarios/simple.toml -r http://localhost:2222 --tpb 10 --duration 10
+cargo run -- spam --tps 10 -r http://localhost:2222 --optimism --min-balance 0.14
 ```
 
 And you should start to see blocks being built and landed on-chain with `contender` transactions.
-
 
 ## Builder playground
 
@@ -137,7 +169,6 @@ You could also run it using:
 just run-playground
 ```
 
-
 This will automatically try to detect all settings and ports from the currently running playground. Sometimes you might need to clean up the builder-playground state between runs. This can be done using:
 
 ```
@@ -153,8 +184,9 @@ To verify that CI will allow your PR to be merged before sending it please make 
 act -W .github/workflows/checks.yaml
 ```
 
-More instructions on installing and configuring `act` can be found on [their website](https://nektosact.com). 
+More instructions on installing and configuring `act` can be found on [their website](https://nektosact.com).
 
 ### Known issues
-- Running actions locally require a Github Token. You can generate one by following instructions on [Github Docs](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). After generating a token you will need to pass it to `act` either through the command line using `-s GITHUB_TOKEN=<your token>` or by adding it to the `~/.config/act/actrc` file.
-- You might get an error about missing or incompatible `warp-ubuntu-latest-x64-32x` platform. This can be mitigated by adding `-P warp-ubuntu-latest-x64-32x=ghcr.io/catthehacker/ubuntu:act-latest` on the command line when calling `act` or appending this flag to `~/.config/act/actrc`
+
+-   Running actions locally require a Github Token. You can generate one by following instructions on [Github Docs](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens). After generating a token you will need to pass it to `act` either through the command line using `-s GITHUB_TOKEN=<your token>` or by adding it to the `~/.config/act/actrc` file.
+-   You might get an error about missing or incompatible `warp-ubuntu-latest-x64-32x` platform. This can be mitigated by adding `-P warp-ubuntu-latest-x64-32x=ghcr.io/catthehacker/ubuntu:act-latest` on the command line when calling `act` or appending this flag to `~/.config/act/actrc`
