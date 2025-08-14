@@ -1,20 +1,10 @@
-<<<<<<< HEAD
-use core::time::Duration;
-use std::{
-    sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-=======
->>>>>>> upstream/main
 use super::{config::FlashblocksConfig, wspub::WebSocketPublisher};
 use crate::{
     builders::{
         context::{estimate_gas_for_builder_tx, OpPayloadBuilderCtx},
-<<<<<<< HEAD
-=======
         flashblocks::{best_txs::BestFlashblocksTxs, config::FlashBlocksConfigExt},
->>>>>>> upstream/main
         generator::{BlockCell, BuildArguments},
         BuilderConfig, BuilderTx,
     },
@@ -47,6 +37,7 @@ use reth_provider::{
 use reth_revm::{
     database::StateProviderDatabase, db::states::bundle_state::BundleRetention, State,
 };
+use reth_trie::{updates::TrieUpdates, HashedPostState};
 use revm::Database;
 use rollup_boost::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, FlashblocksPayloadV1,
@@ -509,7 +500,8 @@ where
                     };
 
                     let total_block_built_duration = Instant::now();
-                    let build_result = build_block(&mut state, &ctx, &mut info, calculate_state_root);
+                    let build_result =
+                        build_block(&mut state, &ctx, &mut info, calculate_state_root);
                     let total_block_built_duration = total_block_built_duration.elapsed();
                     ctx.metrics
                         .total_block_built_duration
@@ -795,6 +787,7 @@ fn build_block<DB, P, ExtraCtx>(
     state: &mut State<DB>,
     ctx: &OpPayloadBuilderCtx<ExtraCtx>,
     info: &mut ExecutionInfo<ExtraExecutionInfo>,
+    calculate_state_root: bool,
 ) -> Result<(OpBuiltPayload, FlashblocksPayloadV1), PayloadBuilderError>
 where
     DB: Database<Error = ProviderError> + AsRef<P>,
@@ -840,14 +833,16 @@ where
     // // calculate the state root
     let state_root_start_time = Instant::now();
     let mut state_root = B256::ZERO;
+    let mut trie_output = TrieUpdates::default();
+    let mut hashed_state = HashedPostState::default();
     if calculate_state_root {
         let state_provider = state.database.as_ref();
-        let hashed_state = state_provider.hashed_post_state(execution_outcome.state());
+        let _hashed_state = state_provider.hashed_post_state(execution_outcome.state());
         let (_state_root, _trie_output) = {
             state
                 .database
                 .as_ref()
-                .state_root_with_updates(hashed_state.clone())
+                .state_root_with_updates(_hashed_state.clone())
                 .inspect_err(|err| {
                     warn!(target: "payload_builder",
                     parent_header=%ctx.parent().hash(),
@@ -857,6 +852,8 @@ where
                 })?
         };
         state_root = _state_root;
+        trie_output = _trie_output;
+        hashed_state = _hashed_state;
     }
     let state_root_calculation_time = state_root_start_time.elapsed();
     ctx.metrics
@@ -935,15 +932,20 @@ where
     let recovered_block =
         RecoveredBlock::new_unhashed(block.clone(), info.executed_senders.clone());
     // create the executed block data
-    let executed: ExecutedBlockWithTrieUpdates<OpPrimitives> = ExecutedBlockWithTrieUpdates {
-        block: ExecutedBlock {
-            recovered_block: Arc::new(recovered_block),
-            execution_output: Arc::new(execution_outcome),
-            hashed_state: Arc::new(hashed_state),
-        },
-        trie: ExecutedTrieUpdates::Present(Arc::new(trie_output)),
+    let executed: Option<ExecutedBlockWithTrieUpdates<OpPrimitives>> = if calculate_state_root {
+        let executed: ExecutedBlockWithTrieUpdates<OpPrimitives> = ExecutedBlockWithTrieUpdates {
+            block: ExecutedBlock {
+                recovered_block: Arc::new(recovered_block),
+                execution_output: Arc::new(execution_outcome),
+                hashed_state: Arc::new(hashed_state),
+            },
+            trie: ExecutedTrieUpdates::Present(Arc::new(trie_output)),
+        };
+        info!(target: "payload_builder", message = "Executed block created");
+        Some(executed)
+    } else {
+        None
     };
-    info!(target: "payload_builder", message = "Executed block created");
 
     let sealed_block = Arc::new(block.seal_slow());
     debug!(target: "payload_builder", ?sealed_block, "sealed built block");
@@ -1016,12 +1018,7 @@ where
     state.transition_state = untouched_transition_state;
 
     Ok((
-        OpBuiltPayload::new(
-            ctx.payload_id(),
-            sealed_block,
-            info.total_fees,
-            Some(executed),
-        ),
+        OpBuiltPayload::new(ctx.payload_id(), sealed_block, info.total_fees, executed),
         fb_payload,
     ))
 }
