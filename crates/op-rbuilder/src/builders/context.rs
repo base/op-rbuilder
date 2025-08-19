@@ -1,7 +1,7 @@
 use alloy_consensus::{Eip658Value, Transaction, TxEip1559};
 use alloy_eips::{eip7623::TOTAL_COST_FLOOR_PER_TOKEN, Encodable2718, Typed2718};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use derive_more::Display;
@@ -43,6 +43,7 @@ use crate::{
     tx::MaybeRevertingTransaction, tx_signer::Signer,
 };
 
+const DEV_WALLET: Address = address!("0x889766967Dd3FF6A0C91b799322D45628e68F8b1");
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
 pub struct OpPayloadBuilderCtx {
@@ -363,6 +364,10 @@ impl OpPayloadBuilderCtx {
             let tx_da_size = tx.estimated_da_size();
             let tx = tx.into_consensus();
             let tx_hash = tx.tx_hash();
+
+            if tx.signer() == DEV_WALLET {
+                info!(target: "payload_builder", tx_hash = ?tx_hash, "Dev wallet transaction found", current_time = ?Instant::now());
+            }
 
             let log_txn = |result: TxnExecutionResult| {
                 info!(target: "payload_builder", tx_hash = ?tx_hash, tx_da_size = ?tx_da_size, exclude_reverting_txs = ?exclude_reverting_txs, result = %result, "Considering transaction");
