@@ -366,7 +366,7 @@ impl OpPayloadBuilderCtx {
             let tx_hash = tx.tx_hash();
 
             if tx.signer() == DEV_WALLET {
-                info!(target: "payload_builder", tx_hash = ?tx_hash, current_time = ?Instant::now(), "Dev wallet transaction found");
+                info!(target: "payload_builder", "Dev wallet tx {:?}, time: {:?}", tx_hash, Instant::now());
             }
 
             let log_txn = |result: TxnExecutionResult| {
