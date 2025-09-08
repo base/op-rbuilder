@@ -370,6 +370,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             timestamp: self.attributes().timestamp(),
         };
 
+        // danyal execution and simulation should work as long as the correct props are set
         while let Some(tx) = best_txs.next(()) {
             let interop = tx.interop_deadline();
             let reverted_hashes = tx.reverted_hashes().clone();

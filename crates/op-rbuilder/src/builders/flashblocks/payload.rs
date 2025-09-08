@@ -394,6 +394,7 @@ where
 
         // Create best_transaction iterator
         let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
+            // DANYAL override here to fetch from database
             self.pool
                 .best_transactions_with_attributes(ctx.best_transaction_attributes()),
         ));
