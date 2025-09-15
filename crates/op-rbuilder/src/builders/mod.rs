@@ -3,10 +3,11 @@ use core::{
     fmt::Debug,
     time::Duration,
 };
+use eyre::eyre;
 use reth_node_builder::components::PayloadServiceBuilder;
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::OpDAConfig;
-
+use tips_datastore::PostgresDatastore;
 use crate::{
     args::OpRbuilderArgs,
     flashtestations::args::FlashtestationsArgs,

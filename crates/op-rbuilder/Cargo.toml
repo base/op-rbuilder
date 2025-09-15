@@ -9,6 +9,7 @@ repository.workspace = true
 default-run = "op-rbuilder"
 
 [dependencies]
+tips-datastore.workspace = true
 reth.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-cli.workspace = true

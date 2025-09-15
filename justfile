@@ -1,11 +1,10 @@
 # Build and run op-rbuilder in playground mode for testing
 clean-playground:
-    rm -rf ~/.local/share/reth
-    sudo rm -rf ~/.playground
+    rm -rf /Users/danyal/Library/Application\ Support/reth/
 
-run-playground:
+run-playground: clean-playground
     cargo build --bin op-rbuilder -p op-rbuilder
-    ./target/debug/op-rbuilder node --builder.playground
+    ./target/debug/op-rbuilder node --builder.playground --flashblocks.enabled
 
 sequencer_url := "http://localhost:8547"
 builder_url := "http://localhost:2222"

@@ -1,12 +1,12 @@
 use alloy_consensus::{
     Eip658Value, Transaction, TxEip1559, conditional::BlockConditionalAttributes,
 };
-use alloy_eips::{Encodable2718, Typed2718, eip7623::TOTAL_COST_FLOOR_PER_TOKEN};
+use alloy_eips::{Encodable2718, Typed2718, eip7623::TOTAL_COST_FLOOR_PER_TOKEN, Decodable2718};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{Address, Bytes, TxKind, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
-use op_alloy_consensus::{OpDepositReceipt, OpTypedTransaction};
+use op_alloy_consensus::{OpDepositReceipt, OpTxEnvelope, OpTypedTransaction};
 use op_revm::OpSpecId;
 use reth::payload::PayloadBuilderAttributes;
 use reth_basic_payload_builder::PayloadConfig;
@@ -36,6 +36,7 @@ use revm::{
     Database, DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated,
 };
 use std::{sync::Arc, time::Instant};
+use alloy_consensus::transaction::SignerRecoverable;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
@@ -47,6 +48,7 @@ use crate::{
     tx::MaybeRevertingTransaction,
     tx_signer::Signer,
 };
+use crate::builders::flashblocks::best_txs::BestFlashblocksTxs;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -488,6 +490,229 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 if is_bundle_tx {
                     num_bundles_reverted += 1;
                 }
+                if exclude_reverting_txs {
+                    log_txn(TxnExecutionResult::RevertedAndExcluded);
+                    info!(target: "payload_builder", tx_hash = ?tx.tx_hash(), "skipping reverted transaction");
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                } else {
+                    log_txn(TxnExecutionResult::Reverted);
+                }
+            }
+
+            // add gas used by the transaction to cumulative gas used, before creating the
+            // receipt
+            let gas_used = result.gas_used();
+            if let Some(max_gas_per_txn) = self.max_gas_per_txn {
+                if gas_used > max_gas_per_txn {
+                    log_txn(TxnExecutionResult::MaxGasUsageExceeded);
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
+            }
+
+            if self
+                .address_gas_limiter
+                .consume_gas(tx.signer(), gas_used)
+                .is_err()
+            {
+                log_txn(TxnExecutionResult::MaxGasUsageExceeded);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            info.cumulative_gas_used += gas_used;
+            // record tx da size
+            info.cumulative_da_bytes_used += tx_da_size;
+
+            // Push transaction changeset and calculate header bloom filter for receipt.
+            let ctx = ReceiptBuilderCtx {
+                tx: tx.inner(),
+                evm: &evm,
+                result,
+                state: &state,
+                cumulative_gas_used: info.cumulative_gas_used,
+            };
+            info.receipts.push(self.build_receipt(ctx, None));
+
+            // commit changes
+            evm.db_mut().commit(state);
+
+            // update add to total fees
+            let miner_fee = tx
+                .effective_tip_per_gas(base_fee)
+                .expect("fee is always valid; execution succeeded");
+            info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
+
+            // append sender and transaction to the respective lists
+            info.executed_senders.push(tx.signer());
+            info.executed_transactions.push(tx.into_inner());
+        }
+
+        let payload_tx_simulation_time = execute_txs_start_time.elapsed();
+        self.metrics.set_payload_builder_metrics(
+            payload_tx_simulation_time,
+            num_txs_considered,
+            num_txs_simulated,
+            num_txs_simulated_success,
+            num_txs_simulated_fail,
+            num_bundles_reverted,
+        );
+
+        debug!(
+            target: "payload_builder",
+            message = "Completed executing best transactions",
+            txs_executed = num_txs_considered,
+            txs_applied = num_txs_simulated_success,
+            txs_rejected = num_txs_simulated_fail,
+            bundles_reverted = num_bundles_reverted,
+        );
+        Ok(None)
+    }
+
+    /// Executes the given best transactions and updates the execution info.
+    ///
+    /// Returns `Ok(Some(())` if the job was cancelled.
+    pub fn execute_best_bundles<DB, E: Debug + Default>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        state: &mut State<DB>,
+        best_txs: &mut BestFlashblocksTxs,
+        block_gas_limit: u64,
+        block_da_limit: Option<u64>,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        DB: Database<Error = ProviderError> + std::fmt::Debug,
+    {
+        let execute_txs_start_time = Instant::now();
+        let mut num_txs_considered = 0;
+        let mut num_txs_simulated = 0;
+        let mut num_txs_simulated_success = 0;
+        let mut num_txs_simulated_fail = 0;
+        let mut num_bundles_reverted = 0;
+        let base_fee = self.base_fee();
+        let tx_da_limit = self.da_config.max_da_tx_size();
+        let mut evm = self
+            .evm_config
+            .evm_with_env(&mut *state, self.evm_env.clone());
+
+        info!(
+            target: "payload_builder",
+            message = "Executing best bundles",
+            block_da_limit = ?block_da_limit,
+            tx_da_limit = ?tx_da_limit,
+            block_gas_limit = ?block_gas_limit,
+        );
+
+        // Remove once we merge Reth 1.4.4
+        // Fixed in https://github.com/paradigmxyz/reth/pull/16514
+        self.metrics
+            .da_block_size_limit
+            .set(block_da_limit.map_or(-1.0, |v| v as f64));
+        self.metrics
+            .da_tx_size_limit
+            .set(tx_da_limit.map_or(-1.0, |v| v as f64));
+
+        let block_attr = BlockConditionalAttributes {
+            number: self.block_number(),
+            timestamp: self.attributes().timestamp(),
+        };
+
+        while let Some(bundle_with_meta) = best_txs.next(()) {
+            // TODO: Currently assuming all bundles are 1 tx bundles, error handling etc.
+            let bundle = bundle_with_meta.bundle;
+
+            let tx_data = bundle.txs[0].clone();
+            let tx = OpTxEnvelope::decode_2718_exact(tx_data.iter().as_slice()).unwrap();
+            let tx = SignerRecoverable::try_into_recovered(tx).unwrap();
+
+            let tx_da_size = op_alloy_flz::tx_estimated_size_fjord_bytes(tx_data.iter().as_slice());
+
+            let reverted_hashes = bundle.reverting_tx_hashes.clone();
+            let tx_hash = tx.tx_hash();
+
+            // exclude reverting transaction if:
+            // - the transaction comes from a bundle (is_some) and the hash **is not** in reverted hashes
+            // Note that we need to use the Option to signal whether the transaction comes from a bundle,
+            // otherwise, we would exclude all transactions that are not in the reverted hashes.
+            let exclude_reverting_txs = !reverted_hashes.contains(&tx_hash);
+
+            let log_txn = |result: TxnExecutionResult| {
+                debug!(
+                    target: "payload_builder",
+                    message = "Considering transaction",
+                    tx_hash = ?tx_hash,
+                    tx_da_size = ?tx_da_size,
+                    exclude_reverting_txs = ?exclude_reverting_txs,
+                    result = %result,
+                );
+            };
+
+            num_txs_considered += 1;
+
+            // ensure we still have capacity for this transaction
+            if let Err(result) = info.is_tx_over_limits(
+                tx_da_size,
+                block_gas_limit,
+                tx_da_limit,
+                block_da_limit,
+                tx.gas_limit(),
+            ) {
+                // we can't fit this transaction into the block, so we need to mark it as
+                // invalid which also removes all dependent transaction from
+                // the iterator before we can continue
+                log_txn(result);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // A sequencer's block should never contain blob or deposit transactions from the pool.
+            if tx.is_eip4844() || tx.is_deposit() {
+                log_txn(TxnExecutionResult::SequencerTransaction);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // check if the job was cancelled, if so we can exit early
+            if self.cancel.is_cancelled() {
+                return Ok(Some(()));
+            }
+
+            let tx_simulation_start_time = Instant::now();
+            let ResultAndState { result, state } = match evm.transact(&tx) {
+                Ok(res) => res,
+                Err(err) => {
+                    if let Some(err) = err.as_invalid_tx_err() {
+                        if err.is_nonce_too_low() {
+                            // if the nonce is too low, we can skip this transaction
+                            log_txn(TxnExecutionResult::NonceTooLow);
+                            trace!(target: "payload_builder", %err, ?tx, "skipping nonce too low transaction");
+                        } else {
+                            // if the transaction is invalid, we can skip it and all of its
+                            // descendants
+                            log_txn(TxnExecutionResult::InternalError(err.clone()));
+                            trace!(target: "payload_builder", %err, ?tx, "skipping invalid transaction and its descendants");
+                            best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        }
+
+                        continue;
+                    }
+                    // this is an error that we should treat as fatal for this attempt
+                    log_txn(TxnExecutionResult::EvmError);
+                    return Err(PayloadBuilderError::EvmExecutionError(Box::new(err)));
+                }
+            };
+
+            self.metrics
+                .tx_simulation_duration
+                .record(tx_simulation_start_time.elapsed());
+            self.metrics.tx_byte_size.record(tx.inner().size() as f64);
+            num_txs_simulated += 1;
+            if result.is_success() {
+                log_txn(TxnExecutionResult::Success);
+                num_txs_simulated_success += 1;
+            } else {
+                num_txs_simulated_fail += 1;
                 if exclude_reverting_txs {
                     log_txn(TxnExecutionResult::RevertedAndExcluded);
                     info!(target: "payload_builder", tx_hash = ?tx.tx_hash(), "skipping reverted transaction");

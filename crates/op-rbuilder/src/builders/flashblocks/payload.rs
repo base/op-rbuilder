@@ -48,6 +48,8 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
+use tips_datastore::{BundleDatastore, PostgresDatastore};
+use tips_datastore::postgres::BundleFilter;
 use tokio::sync::{
     mpsc,
     mpsc::{Sender, error::SendError},
@@ -122,6 +124,9 @@ pub struct OpPayloadBuilder<Pool, Client, BT> {
         Arc<OnceLock<tokio::sync::broadcast::Sender<Events<OpEngineTypes>>>>,
     /// Rate limiting based on gas. This is an optional feature.
     pub address_gas_limiter: AddressGasLimiter,
+
+    /// TODO
+    pub db: PostgresDatastore,
 }
 
 impl<Pool, Client, BT> OpPayloadBuilder<Pool, Client, BT> {
@@ -136,6 +141,13 @@ impl<Pool, Client, BT> OpPayloadBuilder<Pool, Client, BT> {
             OnceLock<tokio::sync::broadcast::Sender<Events<OpEngineTypes>>>,
         >,
     ) -> eyre::Result<Self> {
+        let db = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                PostgresDatastore::connect(String::from("postgresql://postgres:postgres@localhost:5432/postgres"))
+                    .await.expect("cannot connect to db")
+            })
+        });
+
         let metrics = Arc::new(OpRBuilderMetrics::default());
         let ws_pub = WebSocketPublisher::new(config.specific.ws_addr, Arc::clone(&metrics))?.into();
         let address_gas_limiter = AddressGasLimiter::new(config.gas_limiter_config.clone());
@@ -149,6 +161,7 @@ impl<Pool, Client, BT> OpPayloadBuilder<Pool, Client, BT> {
             builder_tx,
             payload_builder_handle,
             address_gas_limiter,
+            db,
         })
     }
 }
@@ -392,12 +405,11 @@ where
             *da_limit = da_limit.saturating_sub(builder_tx_da_size);
         }
 
+
+
         // Create best_transaction iterator
-        let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            // DANYAL override here to fetch from database
-            self.pool
-                .best_transactions_with_attributes(ctx.best_transaction_attributes()),
-        ));
+        let mut best_txs = BestFlashblocksTxs::new(self.db.clone());
+
         // This channel coordinates flashblock building
         let (fb_cancel_token_tx, mut fb_cancel_token_rx) =
             mpsc::channel((self.config.flashblocks_per_block() + 1) as usize);
@@ -463,14 +475,10 @@ where
                     }
 
                     let best_txs_start_time = Instant::now();
-                    best_txs.refresh_iterator(
-                        BestPayloadTransactions::new(
-                            self.pool.best_transactions_with_attributes(
-                                ctx.best_transaction_attributes(),
-                            ),
-                        ),
-                        ctx.flashblock_index(),
-                    );
+
+
+                    best_txs.refresh_iterator(ctx.flashblock_index());
+
                     let transaction_pool_fetch_time = best_txs_start_time.elapsed();
                     ctx.metrics
                         .transaction_pool_fetch_duration
@@ -480,7 +488,7 @@ where
                         .set(transaction_pool_fetch_time);
 
                     let tx_execution_start_time = Instant::now();
-                    ctx.execute_best_transactions(
+                    ctx.execute_best_bundles(
                         &mut info,
                         &mut state,
                         &mut best_txs,

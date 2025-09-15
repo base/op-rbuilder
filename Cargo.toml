@@ -40,6 +40,8 @@ codegen-units = 1
 incremental = false
 
 [workspace.dependencies]
+tips-datastore = { path = "../tips/crates/datastore" }
+
 reth = { git = "https://github.com/paradigmxyz/reth", tag = "v1.7.0" }
 reth-chain-state = { git = "https://github.com/paradigmxyz/reth", tag = "v1.7.0" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v1.7.0" }

@@ -14,6 +14,9 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
 use std::sync::Arc;
+use eyre::eyre;
+use tips_datastore::PostgresDatastore;
+use tracing::error;
 
 pub struct FlashblocksServiceBuilder(pub BuilderConfig<FlashblocksConfig>);
 

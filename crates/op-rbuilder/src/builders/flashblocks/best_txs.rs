@@ -1,31 +1,35 @@
 use alloy_primitives::{Address, TxHash};
-use reth_payload_util::PayloadTransactions;
-use reth_transaction_pool::PoolTransaction;
 use std::collections::HashSet;
-use tracing::debug;
+use alloy_primitives::hex::ToHexExt;
+use tips_datastore::postgres::{BundleFilter, BundleWithMetadata};
+use tips_datastore::{BundleDatastore, PostgresDatastore};
+use tracing::{debug, warn};
 
-use crate::tx::MaybeFlashblockFilter;
-
-pub struct BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction,
-    I: PayloadTransactions<Transaction = T>,
+pub struct BestFlashblocksTxs
 {
-    inner: I,
+    db: PostgresDatastore,
+    bundle_idx: usize,
+    bundles: Vec<BundleWithMetadata>,
+
     current_flashblock_number: u64,
     // Transactions that were already commited to the state. Using them again would cause NonceTooLow
     // so we skip them
     commited_transactions: HashSet<TxHash>,
 }
 
-impl<T, I> BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction,
-    I: PayloadTransactions<Transaction = T>,
-{
-    pub fn new(inner: I) -> Self {
+impl BestFlashblocksTxs {
+    pub fn new(db: PostgresDatastore) -> Self {
+        // let db = tokio::task::block_in_place(|| {
+        //     tokio::runtime::Handle::current().block_on(async {
+        //         PostgresDatastore::connect(String::from("postgresql://postgres:postgres@localhost:5432/postgres"))
+        //             .await.expect("cannot connect to db")
+        //     })
+        // });
+
         Self {
-            inner,
+            db,
+            bundle_idx: 0,
+            bundles: Vec::new(),
             current_flashblock_number: 0,
             commited_transactions: Default::default(),
         }
@@ -33,8 +37,27 @@ where
 
     /// Replaces current iterator with new one. We use it on new flashblock building, to refresh
     /// priority boundaries
-    pub fn refresh_iterator(&mut self, inner: I, current_flashblock_number: u64) {
-        self.inner = inner;
+    pub fn refresh_iterator(&mut self, current_flashblock_number: u64) {
+        let db_copy = self.db.clone();
+
+        let bundles = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                db_copy.select_bundles(BundleFilter::new()).await.expect("should fetch bundles")
+            })
+        });
+
+        // let bundles = tokio::runtime::Handle::current().block_on(async {
+        //     db_copy.select_bundles(BundleFilter::new()).await.expect("should fetch bundles")
+        // });
+
+        for bundle in bundles.iter() {
+            for txn in bundle.txn_hashes.iter() {
+                warn!(message = "danyal loaded txn", txn = txn.encode_hex());
+            }
+        }
+
+        self.bundle_idx = 0;
+        self.bundles = bundles;
         self.current_flashblock_number = current_flashblock_number;
     }
 
@@ -44,190 +67,66 @@ where
     }
 }
 
-impl<T, I> PayloadTransactions for BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction + MaybeFlashblockFilter,
-    I: PayloadTransactions<Transaction = T>,
-{
-    type Transaction = T;
+impl BestFlashblocksTxs {
 
-    fn next(&mut self, ctx: ()) -> Option<Self::Transaction> {
+    pub fn next(&mut self, _ctx: ()) -> Option<BundleWithMetadata> {
         loop {
-            let tx = self.inner.next(ctx)?;
-            // Skip transaction we already included
-            if self.commited_transactions.contains(tx.hash()) {
-                continue;
+            if self.bundle_idx >= self.bundles.len() {
+                return None;
             }
 
-            let flashblock_number_min = tx.flashblock_number_min();
-            let flashblock_number_max = tx.flashblock_number_max();
+            let tx = self.bundles[self.bundle_idx].clone();
+            self.bundle_idx += 1;
+
+            for txn in tx.txn_hashes.iter() {
+                warn!(message = "danyal considering txn", txn = %tx.txn_hashes[0].encode_hex());
+            }
+
+            for hash in tx.txn_hashes.iter() {
+                if self.commited_transactions.contains(hash) {
+                    continue;
+                }
+            }
+
+            for txn in tx.txn_hashes.iter() {
+                warn!(message = "danyal good txn", txn = %tx.txn_hashes[0].encode_hex());
+            }
+
+            // Skip transaction we already included
+            // let flashblock_number_min = tx.flashblock_number_min();
+            // let flashblock_number_max = tx.flashblock_number_max();
 
             // Check min flashblock requirement
-            if let Some(min) = flashblock_number_min {
-                if self.current_flashblock_number < min {
-                    continue;
-                }
-            }
+            // if let Some(min) = flashblock_number_min {
+            //     if self.current_flashblock_number < min {
+            //         continue;
+            //     }
+            // }
 
             // Check max flashblock requirement
-            if let Some(max) = flashblock_number_max {
-                if self.current_flashblock_number > max {
-                    debug!(
-                        target: "payload_builder",
-                        tx_hash = ?tx.hash(),
-                        sender = ?tx.sender(),
-                        nonce = tx.nonce(),
-                        current_flashblock = self.current_flashblock_number,
-                        max_flashblock = max,
-                        "Bundle flashblock max exceeded"
-                    );
-                    self.inner.mark_invalid(tx.sender(), tx.nonce());
-                    continue;
-                }
-            }
+            // if let Some(max) = flashblock_number_max {
+            //     if self.current_flashblock_number > max {
+            //         debug!(
+            //             target: "payload_builder",
+            //             tx_hash = ?tx.hash(),
+            //             sender = ?tx.sender(),
+            //             nonce = tx.nonce(),
+            //             current_flashblock = self.current_flashblock_number,
+            //             max_flashblock = max,
+            //             "Bundle flashblock max exceeded"
+            //         );
+            //         self.inner.mark_invalid(tx.sender(), tx.nonce());
+            //         continue;
+            //     }
+            // }
 
             return Some(tx);
         }
     }
 
     /// Proxy to inner iterator
-    fn mark_invalid(&mut self, sender: Address, nonce: u64) {
-        self.inner.mark_invalid(sender, nonce);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        builders::flashblocks::best_txs::BestFlashblocksTxs,
-        mock_tx::{MockFbTransaction, MockFbTransactionFactory},
-    };
-    use alloy_consensus::Transaction;
-    use reth_payload_util::{BestPayloadTransactions, PayloadTransactions};
-    use reth_transaction_pool::{CoinbaseTipOrdering, PoolTransaction, pool::PendingPool};
-    use std::sync::Arc;
-
-    #[test]
-    fn test_simple_case() {
-        let mut pool = PendingPool::new(CoinbaseTipOrdering::<MockFbTransaction>::default());
-        let mut f = MockFbTransactionFactory::default();
-
-        // Add 3 regular transaction
-        let tx_1 = f.create_eip1559();
-        let tx_2 = f.create_eip1559();
-        let tx_3 = f.create_eip1559();
-        pool.add_transaction(Arc::new(tx_1), 0);
-        pool.add_transaction(Arc::new(tx_2), 0);
-        pool.add_transaction(Arc::new(tx_3), 0);
-
-        // Create iterator
-        let mut iterator = BestFlashblocksTxs::new(BestPayloadTransactions::new(pool.best()));
-        // ### First flashblock
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 0);
-        // Accept first tx
-        let tx1 = iterator.next(()).unwrap();
-        // Invalidate second tx
-        let tx2 = iterator.next(()).unwrap();
-        iterator.mark_invalid(tx2.sender(), tx2.nonce());
-        // Accept third tx
-        let tx3 = iterator.next(()).unwrap();
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-        // Mark transaction as commited
-        iterator.mark_commited(vec![*tx1.hash(), *tx3.hash()]);
-
-        // ### Second flashblock
-        // It should not return txs 1 and 3, but should return 2
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 1);
-        let tx2 = iterator.next(()).unwrap();
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-        // Mark transaction as commited
-        iterator.mark_commited(vec![*tx2.hash()]);
-
-        // ### Third flashblock
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 2);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-    }
-
-    /// Test bundle cases
-    /// We won't mark transactions as commited to test that boundaries are respected
-    #[test]
-    fn test_bundle_case() {
-        let mut pool = PendingPool::new(CoinbaseTipOrdering::<MockFbTransaction>::default());
-        let mut f = MockFbTransactionFactory::default();
-
-        // Add 4 fb transaction
-        let tx_1 = f.create_legacy_fb(None, None);
-        let tx_1_hash = *tx_1.hash();
-        let tx_2 = f.create_legacy_fb(None, Some(1));
-        let tx_2_hash = *tx_2.hash();
-        let tx_3 = f.create_legacy_fb(Some(1), None);
-        let tx_3_hash = *tx_3.hash();
-        let tx_4 = f.create_legacy_fb(Some(2), Some(3));
-        let tx_4_hash = *tx_4.hash();
-        pool.add_transaction(Arc::new(tx_1), 0);
-        pool.add_transaction(Arc::new(tx_2), 0);
-        pool.add_transaction(Arc::new(tx_3), 0);
-        pool.add_transaction(Arc::new(tx_4), 0);
-
-        // Create iterator
-        let mut iterator = BestFlashblocksTxs::new(BestPayloadTransactions::new(pool.best()));
-        // ### First flashblock
-        // should contain txs 1 and 2
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 0);
-        let tx1 = iterator.next(()).unwrap();
-        assert_eq!(tx1.hash(), &tx_1_hash);
-        let tx2 = iterator.next(()).unwrap();
-        assert_eq!(tx2.hash(), &tx_2_hash);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-
-        // ### Second flashblock
-        // should contain txs 1, 2, and 3
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 1);
-        let tx1 = iterator.next(()).unwrap();
-        assert_eq!(tx1.hash(), &tx_1_hash);
-        let tx2 = iterator.next(()).unwrap();
-        assert_eq!(tx2.hash(), &tx_2_hash);
-        let tx3 = iterator.next(()).unwrap();
-        assert_eq!(tx3.hash(), &tx_3_hash);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-
-        // ### Third flashblock
-        // should contain txs 1, 3, and 4
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 2);
-        let tx1 = iterator.next(()).unwrap();
-        assert_eq!(tx1.hash(), &tx_1_hash);
-        let tx3 = iterator.next(()).unwrap();
-        assert_eq!(tx3.hash(), &tx_3_hash);
-        let tx4 = iterator.next(()).unwrap();
-        assert_eq!(tx4.hash(), &tx_4_hash);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-
-        // ### Forth flashblock
-        // should contain txs 1, 3, and 4
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 3);
-        let tx1 = iterator.next(()).unwrap();
-        assert_eq!(tx1.hash(), &tx_1_hash);
-        let tx3 = iterator.next(()).unwrap();
-        assert_eq!(tx3.hash(), &tx_3_hash);
-        let tx4 = iterator.next(()).unwrap();
-        assert_eq!(tx4.hash(), &tx_4_hash);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
-
-        // ### Fifth flashblock
-        // should contain txs 1 and 3
-        iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 4);
-        let tx1 = iterator.next(()).unwrap();
-        assert_eq!(tx1.hash(), &tx_1_hash);
-        let tx3 = iterator.next(()).unwrap();
-        assert_eq!(tx3.hash(), &tx_3_hash);
-        // Check that it's empty
-        assert!(iterator.next(()).is_none(), "Iterator should be empty");
+    pub fn mark_invalid(&mut self, _sender: Address, _nonce: u64) {
+        // TODO
+        // self.inner.mark_invalid(sender, nonce);
     }
 }
