@@ -28,6 +28,7 @@ pub trait FBPoolTransaction:
 pub struct FBPooledTransaction {
     pub inner: OpPooledTransaction,
     pub exclude_reverting_txs: bool,
+    pub sim_outcome: Option<SimOutcome>,
 }
 
 impl FBPoolTransaction for FBPooledTransaction {}
@@ -49,7 +50,9 @@ impl MaybeRevertingTransaction for FBPooledTransaction {
 
 impl InMemorySize for FBPooledTransaction {
     fn size(&self) -> usize {
-        self.inner.size() + core::mem::size_of::<bool>()
+        self.inner.size()
+            + core::mem::size_of::<bool>()
+            + core::mem::size_of::<Option<SimOutcome>>()
     }
 }
 
@@ -72,6 +75,7 @@ impl PoolTransaction for FBPooledTransaction {
         Self {
             inner,
             exclude_reverting_txs: false,
+            sim_outcome: None,
         }
     }
 
@@ -232,6 +236,7 @@ impl From<OpPooledTransaction> for FBPooledTransaction {
         Self {
             inner: tx,
             exclude_reverting_txs: false,
+            sim_outcome: None,
         }
     }
 }
@@ -256,6 +261,31 @@ impl MaybeConditionalTransaction for FBPooledTransaction {
         FBPooledTransaction {
             inner: self.inner.with_conditional(conditional),
             exclude_reverting_txs: self.exclude_reverting_txs,
+            sim_outcome: self.sim_outcome,
         }
+    }
+}
+
+/// Result of simulating a transaction during validation.
+#[derive(Clone, Debug)]
+pub struct SimOutcome {
+    pub success: bool,
+    pub invalid_nonce_too_low: bool,
+    pub invalid_other: bool,
+    pub simulated_gas_used: Option<u64>,
+}
+
+pub trait MaybeSimulatedTransaction {
+    fn set_sim_outcome(&mut self, outcome: SimOutcome);
+    fn sim_outcome(&self) -> Option<&SimOutcome>;
+}
+
+impl MaybeSimulatedTransaction for FBPooledTransaction {
+    fn set_sim_outcome(&mut self, outcome: SimOutcome) {
+        self.sim_outcome = Some(outcome);
+    }
+
+    fn sim_outcome(&self) -> Option<&SimOutcome> {
+        self.sim_outcome.as_ref()
     }
 }
