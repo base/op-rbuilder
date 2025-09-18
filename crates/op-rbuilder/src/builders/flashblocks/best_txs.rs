@@ -79,17 +79,13 @@ impl BestFlashblocksTxs {
             self.bundle_idx += 1;
 
             for txn in tx.txn_hashes.iter() {
-                warn!(message = "danyal considering txn", txn = %tx.txn_hashes[0].encode_hex());
+                debug!(message = "TIPS considering txn", txn = %tx.txn_hashes[0].encode_hex());
             }
 
             for hash in tx.txn_hashes.iter() {
                 if self.commited_transactions.contains(hash) {
                     continue;
                 }
-            }
-
-            for txn in tx.txn_hashes.iter() {
-                warn!(message = "danyal good txn", txn = %tx.txn_hashes[0].encode_hex());
             }
 
             // Skip transaction we already included
