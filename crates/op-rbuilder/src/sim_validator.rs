@@ -203,6 +203,7 @@ where
                         invalid_nonce_too_low: false,
                         invalid_other: true,
                         simulated_gas_used: None,
+                        execution_time_us: None,
                     }
                 }
             };
@@ -218,6 +219,7 @@ where
                         invalid_nonce_too_low: false,
                         invalid_other: true,
                         simulated_gas_used: None,
+                        execution_time_us: None,
                     }
                 }
             };
@@ -228,6 +230,7 @@ where
                     invalid_nonce_too_low: false,
                     invalid_other: true,
                     simulated_gas_used: None,
+                    execution_time_us: None,
                 };
             }
             // release the borrow on sim_state held by builder
@@ -235,15 +238,18 @@ where
 
             // Simulate transaction
             let mut evm = evm_config.evm_with_env(&mut sim_state, evm_env);
+            let start = std::time::Instant::now();
             match evm.transact(&tx) {
                 Ok(res) => {
                     let success = res.result.is_success();
                     let gas_used = res.result.gas_used();
+                    let elapsed = start.elapsed().as_micros();
                     SimOutcome {
                         success,
                         invalid_nonce_too_low: false,
                         invalid_other: false,
                         simulated_gas_used: Some(gas_used),
+                        execution_time_us: Some(elapsed),
                     }
                 }
                 Err(_err) => {
@@ -252,6 +258,7 @@ where
                         invalid_nonce_too_low: false,
                         invalid_other: true,
                         simulated_gas_used: None,
+                        execution_time_us: None,
                     }
                 }
             }

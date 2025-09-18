@@ -370,6 +370,13 @@ where
                         best_txs,
                         total_gas_per_batch.min(ctx.block_gas_limit()),
                         total_da_per_batch,
+                        // Flashblocks time budget per chunk (microseconds)
+                        Some(
+                            self.config
+                                .block_time
+                                .saturating_sub(self.config.block_time_leeway)
+                                .as_micros(),
+                        ),
                     )?;
                     ctx.metrics
                         .payload_tx_simulation_duration

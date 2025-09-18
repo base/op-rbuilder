@@ -249,7 +249,14 @@ where
             metrics: self.metrics.clone(),
         };
 
-        let builder = OpBuilder::new(best);
+        // Compute microsecond budget from builder config
+        let block_execution_time_limit_us = Some(
+            self.config
+                .block_time
+                .saturating_sub(self.config.block_time_leeway)
+                .as_micros(),
+        );
+        let builder = OpBuilder::new(best, block_execution_time_limit_us);
 
         let state_provider = self.client.state_by_block_hash(ctx.parent().hash())?;
         let state = StateProviderDatabase::new(state_provider);
@@ -298,12 +305,18 @@ where
 pub struct OpBuilder<'a, Txs> {
     /// Yields the best transaction to include if transactions from the mempool are allowed.
     best: Box<dyn FnOnce(BestTransactionsAttributes) -> Txs + 'a>,
+    /// Optional per-block execution time budget in microseconds
+    block_execution_time_limit_us: Option<u128>,
 }
 
 impl<'a, Txs> OpBuilder<'a, Txs> {
-    fn new(best: impl FnOnce(BestTransactionsAttributes) -> Txs + Send + Sync + 'a) -> Self {
+    fn new(
+        best: impl FnOnce(BestTransactionsAttributes) -> Txs + Send + Sync + 'a,
+        block_execution_time_limit_us: Option<u128>,
+    ) -> Self {
         Self {
             best: Box::new(best),
+            block_execution_time_limit_us,
         }
     }
 }
@@ -326,7 +339,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
         DB: Database<Error = ProviderError> + AsRef<P>,
         P: StorageRootProvider,
     {
-        let Self { best } = self;
+        let Self { best, block_execution_time_limit_us: _ } = self;
         info!(target: "payload_builder", id=%ctx.payload_id(), parent_header = ?ctx.parent().hash(), parent_number = ctx.parent().number, "building new payload");
 
         // 1. apply pre-execution changes
@@ -375,6 +388,9 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
             ctx.metrics
                 .transaction_pool_fetch_duration
                 .record(best_txs_start_time.elapsed());
+            // Budget for execution time: use available time within block window as soft cap.
+            // We budget the simulation/execution within (block_time - block_time_leeway).
+            let block_execution_time_limit_us = self.block_execution_time_limit_us;
             if ctx
                 .execute_best_transactions(
                     &mut info,
@@ -382,6 +398,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
                     best_txs,
                     block_gas_limit,
                     block_da_limit,
+                    block_execution_time_limit_us,
                 )?
                 .is_some()
             {

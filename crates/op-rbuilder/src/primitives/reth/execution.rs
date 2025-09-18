@@ -17,6 +17,8 @@ pub struct ExecutionInfo<Extra: Debug + Default = ()> {
     pub cumulative_da_bytes_used: u64,
     /// Tracks fees from executed mempool transactions
     pub total_fees: U256,
+    /// Cumulative execution time of simulated mempool transactions in microseconds
+    pub cumulative_execution_time_us: u128,
     /// Extra execution information that can be attached by individual builders.
     pub extra: Extra,
 }
@@ -31,6 +33,7 @@ impl<T: Debug + Default> ExecutionInfo<T> {
             cumulative_gas_used: 0,
             cumulative_da_bytes_used: 0,
             total_fees: U256::ZERO,
+            cumulative_execution_time_us: 0,
             extra: Default::default(),
         }
     }
@@ -48,6 +51,8 @@ impl<T: Debug + Default> ExecutionInfo<T> {
         tx_data_limit: Option<u64>,
         block_data_limit: Option<u64>,
         tx_gas_limit: u64,
+        tx_execution_time_us: Option<u128>,
+        block_execution_time_limit_us: Option<u128>,
     ) -> bool {
         if tx_data_limit.is_some_and(|da_limit| tx_da_size > da_limit) {
             return true;
@@ -55,6 +60,13 @@ impl<T: Debug + Default> ExecutionInfo<T> {
 
         if block_data_limit
             .is_some_and(|da_limit| self.cumulative_da_bytes_used + tx_da_size > da_limit)
+        {
+            return true;
+        }
+
+        if block_execution_time_limit_us
+            .zip(tx_execution_time_us)
+            .is_some_and(|(budget_us, tx_us)| self.cumulative_execution_time_us + tx_us > budget_us)
         {
             return true;
         }

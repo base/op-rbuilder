@@ -7,7 +7,7 @@ use reth_payload_util::PayloadTransactions;
 use reth_provider::{BlockReaderIdExt, ChainSpecProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
 
-use crate::tx::FBPoolTransaction;
+use crate::tx::{FBPoolTransaction, MaybeSimulatedTransaction};
 
 pub trait NodeBounds:
     FullNodeTypes<
@@ -28,18 +28,20 @@ impl<T> NodeBounds for T where
 }
 
 pub trait PoolBounds:
-    TransactionPool<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned>> + Unpin + 'static
+    TransactionPool<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned> + MaybeSimulatedTransaction>
+    + Unpin
+    + 'static
 where
-    <Self as TransactionPool>::Transaction: FBPoolTransaction,
+    <Self as TransactionPool>::Transaction: FBPoolTransaction + MaybeSimulatedTransaction,
 {
 }
 
 impl<T> PoolBounds for T
 where
-    T: TransactionPool<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned>>
+    T: TransactionPool<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned> + MaybeSimulatedTransaction>
         + Unpin
         + 'static,
-    <Self as TransactionPool>::Transaction: FBPoolTransaction,
+    <Self as TransactionPool>::Transaction: FBPoolTransaction + MaybeSimulatedTransaction,
 {
 }
 
@@ -60,11 +62,11 @@ impl<T> ClientBounds for T where
 }
 
 pub trait PayloadTxsBounds:
-    PayloadTransactions<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned>>
+    PayloadTransactions<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned> + MaybeSimulatedTransaction>
 {
 }
 
 impl<T> PayloadTxsBounds for T where
-    T: PayloadTransactions<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned>>
+    T: PayloadTransactions<Transaction: FBPoolTransaction<Consensus = OpTransactionSigned> + MaybeSimulatedTransaction>
 {
 }

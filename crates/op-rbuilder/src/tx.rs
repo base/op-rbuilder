@@ -273,6 +273,7 @@ pub struct SimOutcome {
     pub invalid_nonce_too_low: bool,
     pub invalid_other: bool,
     pub simulated_gas_used: Option<u64>,
+    pub execution_time_us: Option<u128>,
 }
 
 pub trait MaybeSimulatedTransaction {

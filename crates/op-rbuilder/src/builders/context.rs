@@ -13,7 +13,6 @@ use reth_chainspec::{EthChainSpec, EthereumHardforks};
 use reth_evm::{
     eth::receipt_builder::ReceiptBuilderCtx, ConfigureEvm, Evm, EvmEnv, EvmError, InvalidTxError,
 };
-use reth_evm::execute::BlockBuilder;
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
@@ -28,8 +27,8 @@ use reth_optimism_txpool::{
 use reth_payload_builder::PayloadId;
 use reth_primitives::{Recovered, SealedHeader};
 use reth_primitives_traits::{InMemorySize, SignedTransaction};
-use reth_provider::{ExecutionOutcome, HashedPostStateProvider, ProviderError, StateProvider, StateRootProvider};
-use reth_revm::{database::StateProviderDatabase, db::states::bundle_state::BundleRetention, State};
+use reth_provider::ProviderError;
+use reth_revm::State;
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{
     context::{result::ResultAndState, Block},
@@ -41,7 +40,7 @@ use tracing::{info, trace, warn};
 
 use crate::{
     metrics::OpRBuilderMetrics, primitives::reth::ExecutionInfo, traits::PayloadTxsBounds,
-    tx::MaybeRevertingTransaction, tx_signer::Signer,
+    tx::MaybeRevertingTransaction, tx::MaybeSimulatedTransaction, tx_signer::Signer,
 };
 
 const DEV_WALLET: Address = address!("0x889766967Dd3FF6A0C91b799322D45628e68F8b1");
@@ -335,6 +334,7 @@ impl OpPayloadBuilderCtx {
         mut best_txs: impl PayloadTxsBounds,
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
+        block_execution_time_limit_us: Option<u128>,
     ) -> Result<Option<()>, PayloadBuilderError>
     where
         DB: Database<Error = ProviderError>,
@@ -363,6 +363,8 @@ impl OpPayloadBuilderCtx {
             let interop = tx.interop_deadline();
             let exclude_reverting_txs = tx.exclude_reverting_txs();
             let tx_da_size = tx.estimated_da_size();
+            // Use previously simulated execution time as an estimate if available
+            let tx_execution_time_estimate_us = tx.sim_outcome().and_then(|o| o.execution_time_us);
             let tx = tx.into_consensus();
             let tx_hash = tx.tx_hash();
 
@@ -395,6 +397,8 @@ impl OpPayloadBuilderCtx {
                 tx_da_limit,
                 block_da_limit,
                 tx.gas_limit(),
+                tx_execution_time_estimate_us,
+                block_execution_time_limit_us,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -444,6 +448,10 @@ impl OpPayloadBuilderCtx {
             self.metrics
                 .tx_simulation_duration
                 .record(tx_simulation_start_time.elapsed());
+            // Track execution time budget consumption (microseconds)
+            info.cumulative_execution_time_us = info
+                .cumulative_execution_time_us
+                .saturating_add(tx_simulation_start_time.elapsed().as_micros());
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
             num_txs_simulated += 1;
             if result.is_success() {
