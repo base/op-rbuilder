@@ -365,6 +365,8 @@ impl OpPayloadBuilderCtx {
             let tx_da_size = tx.estimated_da_size();
             // Use previously simulated execution time as an estimate if available
             let tx_execution_time_estimate_us = tx.sim_outcome().and_then(|o| o.execution_time_us);
+            // Track whether we had a successful prior simulation for this tx
+            let had_successful_simulation = tx.sim_outcome().is_some_and(|o| o.success);
             let tx = tx.into_consensus();
             let tx_hash = tx.tx_hash();
 
@@ -449,9 +451,17 @@ impl OpPayloadBuilderCtx {
                 .tx_simulation_duration
                 .record(tx_simulation_start_time.elapsed());
             // Track execution time budget consumption (microseconds)
+            // Prefer simulated execution time when a successful simulation is available;
+            // fall back to measured elapsed time otherwise.
+            let measured_us = tx_simulation_start_time.elapsed().as_micros();
+            let accounted_us = if had_successful_simulation {
+                tx_execution_time_estimate_us.unwrap_or(measured_us)
+            } else {
+                measured_us
+            };
             info.cumulative_execution_time_us = info
                 .cumulative_execution_time_us
-                .saturating_add(tx_simulation_start_time.elapsed().as_micros());
+                .saturating_add(accounted_us);
             self.metrics.tx_byte_size.record(tx.inner().size() as f64);
             num_txs_simulated += 1;
             if result.is_success() {
