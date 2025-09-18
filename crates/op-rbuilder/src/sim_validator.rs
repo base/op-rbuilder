@@ -9,9 +9,9 @@ use reth_transaction_pool::{
 
 use crate::tx::{SimOutcome, MaybeSimulatedTransaction};
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
-use reth_optimism_primitives::OpTransactionSigned;
+use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 use reth_primitives::SealedHeader;
-use reth_provider::{HashedPostStateProvider, StateProvider, StateRootProvider};
+use reth_provider::{ExecutionOutcome, HashedPostStateProvider, StateProvider, StateRootProvider};
 use reth_revm::State;
 use reth_evm::{ConfigureEvm, execute::BlockBuilder, Evm};
 use reth_revm::database::StateProviderDatabase;
@@ -236,13 +236,36 @@ where
             // release the borrow on sim_state held by builder
             drop(builder);
 
-            // Simulate transaction
+            // Simulate transaction and include state root calculation time
             let mut evm = evm_config.evm_with_env(&mut sim_state, evm_env);
             let start = std::time::Instant::now();
-            match evm.transact(&tx) {
+            let tx_result = evm.transact(&tx);
+            // release borrow on sim_state held by evm before accessing bundle/database
+            drop(evm);
+
+            match tx_result {
                 Ok(res) => {
                     let success = res.result.is_success();
                     let gas_used = res.result.gas_used();
+
+                    // Build an execution outcome from the post-tx bundle and calculate state root
+                    let block_number = parent.number + 1;
+                    let execution_outcome: ExecutionOutcome<OpPrimitives> =
+                        ExecutionOutcome::new(
+                            sim_state.take_bundle(),
+                            Vec::new(),
+                            block_number,
+                            Vec::new(),
+                        );
+
+                    let state_provider = sim_state.database.as_ref();
+                    let hashed_state = state_provider.hashed_post_state(execution_outcome.state());
+                    // Calculate state root; ignore the result but include it in timing
+                    let _ = sim_state
+                        .database
+                        .as_ref()
+                        .state_root_with_updates(hashed_state);
+
                     let elapsed = start.elapsed().as_micros();
                     SimOutcome {
                         success,
@@ -253,6 +276,8 @@ where
                     }
                 }
                 Err(_err) => {
+                    // Explicitly drop any accumulated overlay changes.
+                    let _ = sim_state.take_bundle();
                     SimOutcome {
                         success: false,
                         invalid_nonce_too_low: false,
