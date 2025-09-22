@@ -683,7 +683,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 Ok(res) => res,
                 Err(err) => {
                     if let Some(err) = err.as_invalid_tx_err() {
-                        debug!(target: "payload_builder", "Error when transact error", %tx, %err);
+                        debug!(target: "payload_builder", %err, ?tx, "Error when transact error");
                         if err.is_nonce_too_low() {
                             // if the nonce is too low, we can skip this transaction
                             log_txn(TxnExecutionResult::NonceTooLow);
