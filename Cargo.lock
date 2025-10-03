@@ -12593,6 +12593,7 @@ dependencies = [
  "async-trait",
  "eyre",
  "op-alloy-consensus 0.20.0",
+ "serde_json",
  "sqlx",
  "tokio",
  "tracing",
