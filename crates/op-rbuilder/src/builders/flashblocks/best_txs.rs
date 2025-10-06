@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, TxHash};
 use std::collections::HashSet;
 use alloy_primitives::hex::ToHexExt;
-use tips_datastore::postgres::{BundleFilter, BundleWithMetadata};
+use tips_datastore::postgres::{BundleFilter, BundleWithMetadata, Simulation};
 use tips_datastore::{BundleDatastore, PostgresDatastore};
 use tracing::{debug, warn};
 
@@ -9,7 +9,7 @@ pub struct BestFlashblocksTxs
 {
     db: PostgresDatastore,
     bundle_idx: usize,
-    bundles: Vec<BundleWithMetadata>,
+    bundles: Vec<(BundleWithMetadata, Simulation)>,
 
     current_flashblock_number: u64,
     // Transactions that were already commited to the state. Using them again would cause NonceTooLow
@@ -42,7 +42,7 @@ impl BestFlashblocksTxs {
 
         let bundles = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                db_copy.select_bundles(BundleFilter::new()).await.expect("should fetch bundles")
+                db_copy.select_bundles_with_latest_simulation(BundleFilter::new()).await.expect("should fetch bundles")
             })
         });
 
@@ -50,7 +50,7 @@ impl BestFlashblocksTxs {
         //     db_copy.select_bundles(BundleFilter::new()).await.expect("should fetch bundles")
         // });
 
-        for bundle in bundles.iter() {
+        for (bundle, _simulation) in bundles.iter() {
             for txn in bundle.txn_hashes.iter() {
                 warn!(message = "danyal loaded txn", txn = txn.encode_hex());
             }
@@ -69,20 +69,20 @@ impl BestFlashblocksTxs {
 
 impl BestFlashblocksTxs {
 
-    pub fn next(&mut self, _ctx: ()) -> Option<BundleWithMetadata> {
+    pub fn next(&mut self, _ctx: ()) -> Option<(BundleWithMetadata, Simulation)> {
         loop {
             if self.bundle_idx >= self.bundles.len() {
                 return None;
             }
 
-            let tx = self.bundles[self.bundle_idx].clone();
+            let (bundle, _simulation) = self.bundles[self.bundle_idx].clone();
             self.bundle_idx += 1;
 
-            for txn in tx.txn_hashes.iter() {
-                debug!(message = "TIPS considering txn", txn = %tx.txn_hashes[0].encode_hex());
+            for txn in bundle.txn_hashes.iter() {
+                debug!(message = "TIPS considering txn", txn = %txn.encode_hex());
             }
 
-            for hash in tx.txn_hashes.iter() {
+            for hash in bundle.txn_hashes.iter() {
                 if self.commited_transactions.contains(hash) {
                     continue;
                 }
@@ -116,7 +116,7 @@ impl BestFlashblocksTxs {
             //     }
             // }
 
-            return Some(tx);
+            return Some((bundle, _simulation));
         }
     }
 

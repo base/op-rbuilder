@@ -431,6 +431,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 tx_da_limit,
                 block_da_limit,
                 tx.gas_limit(),
+                None,
+                None,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -580,6 +582,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         best_txs: &mut BestFlashblocksTxs,
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
+        block_exec_time_limit: u64,
     ) -> Result<Option<()>, PayloadBuilderError>
     where
         DB: Database<Error = ProviderError> + std::fmt::Debug,
@@ -589,7 +592,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let mut num_txs_simulated = 0;
         let mut num_txs_simulated_success = 0;
         let mut num_txs_simulated_fail = 0;
-        let mut num_bundles_reverted = 0;
+        let num_bundles_reverted = 0;
         let base_fee = self.base_fee();
         let tx_da_limit = self.da_config.max_da_tx_size();
         let mut evm = self
@@ -613,12 +616,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             .da_tx_size_limit
             .set(tx_da_limit.map_or(-1.0, |v| v as f64));
 
-        let block_attr = BlockConditionalAttributes {
-            number: self.block_number(),
-            timestamp: self.attributes().timestamp(),
-        };
-
-        while let Some(bundle_with_meta) = best_txs.next(()) {
+        while let Some((bundle_with_meta, simulation)) = best_txs.next(()) {
             // TODO: Currently assuming all bundles are 1 tx bundles, error handling etc.
             let bundle = bundle_with_meta.bundle;
 
@@ -627,6 +625,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             let tx = SignerRecoverable::try_into_recovered(tx).unwrap();
 
             let tx_da_size = op_alloy_flz::tx_estimated_size_fjord_bytes(tx_data.iter().as_slice());
+            let tx_exec_time = simulation.execution_time_us;
 
             let reverted_hashes = bundle.reverting_tx_hashes.clone();
             let tx_hash = tx.tx_hash();
@@ -643,6 +642,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                     message = "Considering transaction",
                     tx_hash = ?tx_hash,
                     tx_da_size = ?tx_da_size,
+                    tx_exec_time = ?tx_exec_time,
                     exclude_reverting_txs = ?exclude_reverting_txs,
                     result = %result,
                 );
@@ -657,6 +657,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 tx_da_limit,
                 block_da_limit,
                 tx.gas_limit(),
+                Some(tx_exec_time),
+                Some(block_exec_time_limit),
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -748,6 +750,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.cumulative_gas_used += gas_used;
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
+            // record tx execution time
+            info.cumulative_exec_time_us += tx_exec_time;
 
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {

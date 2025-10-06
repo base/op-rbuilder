@@ -388,6 +388,7 @@ where
             .da_config
             .max_da_block_size()
             .map(|da_limit| da_limit / ctx.target_flashblock_count());
+        let total_exec_time_per_batch = self.config.specific.interval / 2;
         // Check that builder tx won't affect fb limit too much
         if let Some(da_limit) = da_per_batch {
             // We error if we can't insert any tx aside from builder tx in flashblock
@@ -494,6 +495,7 @@ where
                         &mut best_txs,
                         total_gas_per_batch.min(ctx.block_gas_limit()),
                         total_da_per_batch,
+                        total_exec_time_per_batch.as_micros() as u64,
                     )?;
                     // Extract last transactions
                     let new_transactions = info.executed_transactions

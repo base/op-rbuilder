@@ -10,6 +10,7 @@ pub enum TxnExecutionResult {
     TransactionDALimitExceeded,
     BlockDALimitExceeded,
     TransactionGasLimitExceeded,
+    BlockExecTimeLimitExceeded,
     SequencerTransaction,
     NonceTooLow,
     InteropFailed,
@@ -34,6 +35,8 @@ pub struct ExecutionInfo<Extra: Debug + Default = ()> {
     pub cumulative_gas_used: u64,
     /// Estimated DA size
     pub cumulative_da_bytes_used: u64,
+    /// Cumulative execution time in microseconds
+    pub cumulative_exec_time_us: u64,
     /// Tracks fees from executed mempool transactions
     pub total_fees: U256,
     /// Extra execution information that can be attached by individual builders.
@@ -49,6 +52,7 @@ impl<T: Debug + Default> ExecutionInfo<T> {
             receipts: Vec::with_capacity(capacity),
             cumulative_gas_used: 0,
             cumulative_da_bytes_used: 0,
+            cumulative_exec_time_us: 0,
             total_fees: U256::ZERO,
             extra: Default::default(),
         }
@@ -60,6 +64,9 @@ impl<T: Debug + Default> ExecutionInfo<T> {
     ///   per tx.
     /// - block DA limit: if configured, ensures the transaction's DA size does not exceed the
     ///   maximum allowed DA limit per block.
+    /// - block exec time limit: if configured, ensures the transaction's execution time does not
+    ///   exceed the maximum allowed execution time per block.
+    /// 
     pub fn is_tx_over_limits(
         &self,
         tx_da_size: u64,
@@ -67,6 +74,8 @@ impl<T: Debug + Default> ExecutionInfo<T> {
         tx_data_limit: Option<u64>,
         block_data_limit: Option<u64>,
         tx_gas_limit: u64,
+        tx_exec_time: Option<u64>,
+        block_exec_time_limit: Option<u64>,
     ) -> Result<(), TxnExecutionResult> {
         if tx_data_limit.is_some_and(|da_limit| tx_da_size > da_limit) {
             return Err(TxnExecutionResult::TransactionDALimitExceeded);
@@ -81,6 +90,13 @@ impl<T: Debug + Default> ExecutionInfo<T> {
         if self.cumulative_gas_used + tx_gas_limit > block_gas_limit {
             return Err(TxnExecutionResult::TransactionGasLimitExceeded);
         }
+
+        if let (Some(exec_time), Some(limit)) = (tx_exec_time, block_exec_time_limit) {
+            if self.cumulative_exec_time_us + exec_time > limit {
+                return Err(TxnExecutionResult::BlockExecTimeLimitExceeded);
+            }
+        }
+
         Ok(())
     }
 }
