@@ -23,9 +23,14 @@ use reth_node_builder::{BuilderContext, components::PayloadServiceBuilder};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
-use std::sync::Arc;
+use std::sync::{Arc};
+use tips_bundle_pool::InMemoryBundlePool;
+use tracing::{warn};
 
-pub struct FlashblocksServiceBuilder(pub BuilderConfig<FlashblocksConfig>);
+pub struct FlashblocksServiceBuilder {
+    pub config: BuilderConfig<FlashblocksConfig>,
+    pub bundle_store: InMemoryBundlePool,
+}
 
 impl FlashblocksServiceBuilder {
     fn spawn_payload_builder_service<Node, Pool, BuilderTx>(
@@ -48,10 +53,10 @@ impl FlashblocksServiceBuilder {
         // this is effectively unused right now due to the usage of reth's `task_executor`.
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (incoming_message_rx, outgoing_message_tx) = if self.0.specific.p2p_enabled {
+        let (incoming_message_rx, outgoing_message_tx) = if self.config.specific.p2p_enabled {
             let mut builder = p2p::NodeBuilder::new();
 
-            if let Some(ref private_key_file) = self.0.specific.p2p_private_key_file
+            if let Some(ref private_key_file) = self.config.specific.p2p_private_key_file
                 && !private_key_file.is_empty()
             {
                 let private_key_hex = std::fs::read_to_string(private_key_file)
@@ -64,7 +69,7 @@ impl FlashblocksServiceBuilder {
             }
 
             let known_peers: Vec<p2p::Multiaddr> =
-                if let Some(ref p2p_known_peers) = self.0.specific.p2p_known_peers {
+                if let Some(ref p2p_known_peers) = self.config.specific.p2p_known_peers {
                     p2p_known_peers
                         .split(',')
                         .map(|s| s.to_string())
@@ -82,9 +87,9 @@ impl FlashblocksServiceBuilder {
                 .with_agent_version(AGENT_VERSION.to_string())
                 .with_protocol(FLASHBLOCKS_STREAM_PROTOCOL)
                 .with_known_peers(known_peers)
-                .with_port(self.0.specific.p2p_port)
+                .with_port(self.config.specific.p2p_port)
                 .with_cancellation_token(cancel.clone())
-                .with_max_peer_count(self.0.specific.p2p_max_peer_count)
+                .with_max_peer_count(self.config.specific.p2p_max_peer_count)
                 .try_build::<Message>()
                 .wrap_err("failed to build flashblocks p2p node")?;
             let multiaddrs = node.multiaddrs();
@@ -116,11 +121,12 @@ impl FlashblocksServiceBuilder {
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
             ctx.provider().clone(),
-            self.0.clone(),
+            self.config.clone(),
             builder_tx,
             built_payload_tx,
             ws_pub.clone(),
             metrics.clone(),
+            self.bundle_store.clone(),
         );
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
 
@@ -130,7 +136,7 @@ impl FlashblocksServiceBuilder {
             payload_job_config,
             payload_builder,
             true,
-            self.0.block_time_leeway,
+            self.config.block_time_leeway,
         );
 
         let (payload_service, payload_builder_handle) =
@@ -138,7 +144,7 @@ impl FlashblocksServiceBuilder {
 
         let syncer_ctx = crate::builders::flashblocks::ctx::OpPayloadSyncerCtx::new(
             &ctx.provider().clone(),
-            self.0,
+            self.config,
             OpEvmConfig::optimism(ctx.chain_spec()),
             metrics.clone(),
         )
@@ -162,7 +168,7 @@ impl FlashblocksServiceBuilder {
             Box::pin(payload_handler.run()),
         );
 
-        tracing::info!("Flashblocks payload builder service started");
+        warn!("Flashblocks payload builder service started");
         Ok(payload_builder_handle)
     }
 }
@@ -178,16 +184,16 @@ where
         pool: Pool,
         _: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
-        let signer = self.0.builder_signer;
+        let signer = self.config.builder_signer;
         let flashtestations_builder_tx = if let Some(builder_key) = signer
-            && self.0.flashtestations_config.flashtestations_enabled
+            && self.config.flashtestations_config.flashtestations_enabled
         {
-            match bootstrap_flashtestations(self.0.flashtestations_config.clone(), builder_key)
+            match bootstrap_flashtestations(self.config.flashtestations_config.clone(), builder_key)
                 .await
             {
                 Ok(builder_tx) => Some(builder_tx),
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to bootstrap flashtestations, builder will not include flashtestations txs");
+                    warn!(error = %e, "Failed to bootstrap flashtestations, builder will not include flashtestations txs");
                     None
                 }
             }
@@ -196,7 +202,7 @@ where
         };
 
         if let Some(flashblocks_number_contract_address) =
-            self.0.specific.flashblocks_number_contract_address
+            self.config.specific.flashblocks_number_contract_address
         {
             self.spawn_payload_builder_service(
                 ctx,

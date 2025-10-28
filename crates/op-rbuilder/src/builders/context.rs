@@ -1,6 +1,6 @@
 use alloy_consensus::{Eip658Value, Transaction, conditional::BlockConditionalAttributes};
 use alloy_eips::Typed2718;
-use alloy_evm::Database;
+use alloy_evm::{Database};
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
@@ -32,8 +32,10 @@ use reth_revm::{State, context::Block};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
 use std::{sync::Arc, time::Instant};
+use alloy_consensus::transaction::{SignerRecoverable, TxHashRef};
+use tips_bundle_pool::pool::{Action, ProcessedBundle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 
 use crate::{
     gas_limiter::AddressGasLimiter,
@@ -43,6 +45,7 @@ use crate::{
     tx::MaybeRevertingTransaction,
     tx_signer::Signer,
 };
+use crate::traits::BundleBounds;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -326,6 +329,152 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         Ok(info)
     }
 
+    /// Executes the best bundles and updates the execution info.
+    ///
+    /// Returns `Ok(Some(())` if the job was cancelled.
+    pub(super) fn execute_best_bundles<E: Debug + Default>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        db: &mut State<impl Database>,
+        best_bundles: &mut impl BundleBounds,
+        block_gas_limit: u64,
+        block_da_limit: Option<u64>,
+    ) -> Result<Vec<ProcessedBundle>, PayloadBuilderError> {
+        let mut processing_result = Vec::new();
+
+        let base_fee = self.base_fee();
+        let tx_da_limit = self.da_config.max_da_tx_size();
+        let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
+
+        debug!(
+            target: "payload_builder",
+            message = "Executing best bundles",
+            block_da_limit = ?block_da_limit,
+            tx_da_limit = ?tx_da_limit,
+            block_gas_limit = ?block_gas_limit,
+        );
+
+        while let Some(bundle_with_metadata) = best_bundles.next(()) {
+            let bundle_with_metadata = bundle_with_metadata.clone();
+
+            // ensure we still have capacity for this bundle
+            if let Err(_result) = info.is_bundle_over_limit(
+                block_gas_limit,
+                tx_da_limit,
+                block_da_limit,
+                &bundle_with_metadata,
+            ) {
+                // we can't fit this bundle into the block, so we need to mark it as
+                // invalid which also removes all dependent transaction from
+                // the iterator before we can continue
+                best_bundles.mark_invalid(&bundle_with_metadata);
+                continue;
+            }
+
+            // check if the job was cancelled, if so we can exit early
+            if self.cancel.is_cancelled() {
+                return Ok(processing_result);
+            }
+
+            // TODO: Extract into execute function
+            for txn in bundle_with_metadata.transactions() {
+                // TODO: limit
+                // if let Some(max_gas_per_txn) = self.max_gas_per_txn {
+                //     if gas_used > max_gas_per_txn {
+                //         TODO
+                //         Break out of this bundle, don't commit
+                //         Drop this bundle
+                        // best_bundles.mark_invalid(&bundle_with_metadata);
+                        // continue;
+                    // }
+                // }
+
+                if txn.is_eip4844() || txn.is_deposit() {
+                    // TODO
+                    // Break out of this bundle, don't commit
+                    // Drop this bundle
+                    best_bundles.mark_invalid(&bundle_with_metadata);
+                    continue;
+                }
+
+                let recovered_tx = match SignerRecoverable::try_into_recovered(txn.clone()) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        error!(message = "unable to recover txn", err=%e.to_string());
+                        // TODO
+                        // Break out of this bundle, don't commit
+                        // Drop this bundle
+                        continue;
+                    }
+                };
+
+                let ResultAndState { result, state } = match evm.transact(&recovered_tx) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        if let Some(err) = err.as_invalid_tx_err() {
+                            if err.is_nonce_too_low() {
+                                // if the nonce is too low, we can skip this transaction
+                                // log_txn(TxnExecutionResult::NonceTooLow);
+                                trace!(target: "payload_builder", %err, ?txn, "skipping nonce too low transaction");
+                            } else {
+                                // if the transaction is invalid, we can skip it and all of its
+                                // descendants
+                                // log_txn(TxnExecutionResult::InternalError(err.clone()));
+                                trace!(target: "payload_builder", %err, ?txn, "skipping invalid transaction and its descendants");
+                                // TODO
+                                best_bundles.mark_invalid(&bundle_with_metadata);
+                            }
+
+                            // TODO
+                            // Break out of this bundle, don't commit
+                            // Drop this bundle
+                            continue;
+                        }
+                        // TODO
+                        // Break out of this bundle, don't commit
+                        // Drop this bundle
+                        continue;
+                    }
+                };
+
+                // add gas used by the transaction to cumulative gas used, before creating the receipt
+                let gas_used = result.gas_used();
+
+                info.cumulative_gas_used += gas_used;
+
+                let ctx = ReceiptBuilderCtx {
+                    tx: txn,
+                    evm: &evm,
+                    result,
+                    state: &state,
+                    cumulative_gas_used: info.cumulative_gas_used,
+                };
+                info.receipts.push(self.build_receipt(ctx, None));
+
+                // TODO: Move out of the loop probably
+                evm.db_mut().commit(state);
+
+                // update add to total fees
+                let miner_fee = txn
+                    .effective_tip_per_gas(base_fee)
+                    .expect("fee is always valid; execution succeeded");
+                info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
+
+                // append sender and transaction to the respective lists
+                info.executed_senders.push(recovered_tx.signer());
+                info.executed_transactions.push(txn.clone());
+            }
+
+            // TODO: confirm this is safe to do
+            info.cumulative_da_bytes_used += bundle_with_metadata.da_size();
+
+            error!(message="DANYAL BUILT BUNDLE");
+            processing_result.push(ProcessedBundle::new(*bundle_with_metadata.uuid(), Action::Included));
+        }
+
+        Ok(processing_result)
+    }
+
     /// Executes the given best transactions and updates the execution info.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
@@ -441,6 +590,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             }
 
             let tx_simulation_start_time = Instant::now();
+
             let ResultAndState { result, state } = match evm.transact(&tx) {
                 Ok(res) => res,
                 Err(err) => {

@@ -1,3 +1,4 @@
+use tips_bundle_pool::InMemoryBundlePool;
 use crate::{
     builders::standard::service::StandardServiceBuilder,
     traits::{NodeBounds, PoolBounds},
@@ -24,6 +25,7 @@ impl super::PayloadBuilder for StandardBuilder {
 
     fn new_service<Node, Pool>(
         config: BuilderConfig<Self::Config>,
+        _bundle_store: InMemoryBundlePool,
     ) -> eyre::Result<Self::ServiceBuilder<Node, Pool>>
     where
         Node: NodeBounds,

@@ -4,7 +4,7 @@ use crate::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
-        flashblocks::{best_txs::BestFlashblocksTxs, config::FlashBlocksConfigExt},
+        flashblocks::{config::FlashBlocksConfigExt},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
     },
     gas_limiter::AddressGasLimiter,
@@ -29,7 +29,6 @@ use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
 use reth_optimism_primitives::{OpPrimitives, OpReceipt, OpTransactionSigned};
-use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{
     ExecutionOutcome, HashedPostStateProvider, ProviderError, StateRootProvider,
@@ -38,7 +37,6 @@ use reth_provider::{
 use reth_revm::{
     State, database::StateProviderDatabase, db::states::bundle_state::BundleRetention,
 };
-use reth_transaction_pool::TransactionPool;
 use reth_trie::{HashedPostState, updates::TrieUpdates};
 use revm::Database;
 use rollup_boost::{
@@ -50,22 +48,11 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use tips_bundle_pool::{InMemoryBundlePool};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, metadata::Level, span, warn};
-
-type NextBestFlashblocksTxs<Pool> = BestFlashblocksTxs<
-    <Pool as TransactionPool>::Transaction,
-    Box<
-        dyn reth_transaction_pool::BestTransactions<
-                Item = Arc<
-                    reth_transaction_pool::ValidPoolTransaction<
-                        <Pool as TransactionPool>::Transaction,
-                    >,
-                >,
-            >,
-    >,
->;
+use crate::builders::flashblocks::best_bundles::BestFlashblocksBundles;
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct FlashblocksExecutionInfo {
@@ -147,6 +134,8 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx> {
     pub builder_tx: BuilderTx,
     /// Rate limiting based on gas. This is an optional feature.
     pub address_gas_limiter: AddressGasLimiter,
+
+    pub bundle_pool: InMemoryBundlePool,
 }
 
 impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
@@ -161,6 +150,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
         payload_tx: mpsc::Sender<OpBuiltPayload>,
         ws_pub: Arc<WebSocketPublisher>,
         metrics: Arc<OpRBuilderMetrics>,
+        bundle_pool: InMemoryBundlePool,
     ) -> Self {
         let address_gas_limiter = AddressGasLimiter::new(config.gas_limiter_config.clone());
         Self {
@@ -173,6 +163,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
             metrics,
             builder_tx,
             address_gas_limiter,
+            bundle_pool,
         }
     }
 }
@@ -459,10 +450,14 @@ where
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
         // Create best_transaction iterator
-        let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            self.pool
-                .best_transactions_with_attributes(ctx.best_transaction_attributes()),
-        ));
+        let mut best_bundles = BestFlashblocksBundles::new(
+            self.pool.clone(),
+            self.bundle_pool.clone(),
+        );
+
+        //TODO
+        best_bundles.load_transactions(ctx.block_number(), 1);
+
         let interval = self.config.specific.interval;
         let (tx, mut rx) = mpsc::channel((self.config.flashblocks_per_block() + 1) as usize);
 
@@ -532,7 +527,7 @@ where
                     &mut info,
                     &mut state,
                     &state_provider,
-                    &mut best_txs,
+                    &mut best_bundles,
                     &block_cancel,
                     &best_payload,
                     &fb_span,
@@ -590,7 +585,7 @@ where
         info: &mut ExecutionInfo<FlashblocksExecutionInfo>,
         state: &mut State<DB>,
         state_provider: impl reth::providers::StateProvider + Clone,
-        best_txs: &mut NextBestFlashblocksTxs<Pool>,
+        best_bundles: &mut BestFlashblocksBundles<Pool>,
         block_cancel: &CancellationToken,
         best_payload: &BlockCell<OpBuiltPayload>,
         span: &tracing::Span,
@@ -634,13 +629,11 @@ where
         }
 
         let best_txs_start_time = Instant::now();
-        best_txs.refresh_iterator(
-            BestPayloadTransactions::new(
-                self.pool
-                    .best_transactions_with_attributes(ctx.best_transaction_attributes()),
-            ),
+        best_bundles.load_transactions(
+            ctx.block_number(),
             flashblock_index,
         );
+
         let transaction_pool_fetch_time = best_txs_start_time.elapsed();
         ctx.metrics
             .transaction_pool_fetch_duration
@@ -650,21 +643,14 @@ where
             .set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
-        ctx.execute_best_transactions(
+        let bundles_processed = ctx.execute_best_bundles(
             info,
             state,
-            best_txs,
+            best_bundles,
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
         )
         .wrap_err("failed to execute best transactions")?;
-        // Extract last transactions
-        let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
-            .to_vec()
-            .iter()
-            .map(|tx| tx.tx_hash())
-            .collect::<Vec<_>>();
-        best_txs.mark_commited(new_transactions);
 
         // We got block cancelled, we won't need anything from the block at this point
         // Caution: this assume that block cancel token only cancelled when new FCU is received
@@ -738,6 +724,9 @@ where
                     .send(new_payload.clone())
                     .await
                     .wrap_err("failed to send built payload to handler")?;
+
+                best_bundles.on_new_flashblock(new_payload.block().number, &fb_payload, bundles_processed);
+
                 best_payload.set(new_payload);
 
                 // Record flashblock build duration
