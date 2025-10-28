@@ -7,6 +7,7 @@ use reth_node_builder::components::PayloadServiceBuilder;
 use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
+use tips_bundle_pool::InMemoryBundlePool;
 use crate::{
     args::OpRbuilderArgs,
     flashtestations::args::FlashtestationsArgs,
@@ -64,6 +65,7 @@ pub trait PayloadBuilder: Send + Sync + 'static {
     /// type.
     fn new_service<Node, Pool>(
         config: BuilderConfig<Self::Config>,
+        bundle_store: InMemoryBundlePool,
     ) -> eyre::Result<Self::ServiceBuilder<Node, Pool>>
     where
         Node: NodeBounds,
@@ -127,7 +129,7 @@ pub struct BuilderConfig<Specific: Clone> {
     pub gas_limiter_config: GasLimiterArgs,
 }
 
-impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
+impl<S: Debug + Clone> Debug for BuilderConfig<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Config")
             .field(

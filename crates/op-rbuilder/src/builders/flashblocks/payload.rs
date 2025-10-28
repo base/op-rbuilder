@@ -4,7 +4,7 @@ use crate::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
-        flashblocks::{best_txs::BestFlashblocksTxs, config::FlashBlocksConfigExt},
+        flashblocks::{config::FlashBlocksConfigExt},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
     },
     gas_limiter::AddressGasLimiter,
@@ -38,7 +38,6 @@ use reth_provider::{
 use reth_revm::{
     State, database::StateProviderDatabase, db::states::bundle_state::BundleRetention,
 };
-use reth_transaction_pool::TransactionPool;
 use reth_trie::{HashedPostState, updates::TrieUpdates};
 use revm::Database;
 use rollup_boost::{
@@ -50,22 +49,11 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
+use tips_bundle_pool::{InMemoryBundlePool};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, metadata::Level, span, warn};
-
-type NextBestFlashblocksTxs<Pool> = BestFlashblocksTxs<
-    <Pool as TransactionPool>::Transaction,
-    Box<
-        dyn reth_transaction_pool::BestTransactions<
-                Item = Arc<
-                    reth_transaction_pool::ValidPoolTransaction<
-                        <Pool as TransactionPool>::Transaction,
-                    >,
-                >,
-            >,
-    >,
->;
+use crate::builders::flashblocks::best_bundles::BestFlashblocksBundles;
 
 #[derive(Debug, Default)]
 struct ExtraExecutionInfo {
@@ -148,6 +136,8 @@ pub(super) struct OpPayloadBuilder<Pool, Client, BuilderTx> {
         Arc<OnceLock<tokio::sync::broadcast::Sender<Events<OpEngineTypes>>>>,
     /// Rate limiting based on gas. This is an optional feature.
     pub address_gas_limiter: AddressGasLimiter,
+
+    pub bundle_pool: InMemoryBundlePool,
 }
 
 impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
@@ -161,6 +151,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
         payload_builder_handle: Arc<
             OnceLock<tokio::sync::broadcast::Sender<Events<OpEngineTypes>>>,
         >,
+        bundle_pool: InMemoryBundlePool,
     ) -> eyre::Result<Self> {
         let metrics = Arc::new(OpRBuilderMetrics::default());
         let ws_pub = WebSocketPublisher::new(config.specific.ws_addr, Arc::clone(&metrics))?.into();
@@ -175,6 +166,7 @@ impl<Pool, Client, BuilderTx> OpPayloadBuilder<Pool, Client, BuilderTx> {
             builder_tx,
             payload_builder_handle,
             address_gas_limiter,
+            bundle_pool,
         })
     }
 }
@@ -437,10 +429,14 @@ where
         ctx.extra_ctx.da_per_batch = da_per_batch;
 
         // Create best_transaction iterator
-        let mut best_txs = BestFlashblocksTxs::new(BestPayloadTransactions::new(
-            self.pool
-                .best_transactions_with_attributes(ctx.best_transaction_attributes()),
-        ));
+        let mut best_bundles = BestFlashblocksBundles::new(
+            self.pool.clone(),
+            self.bundle_pool.clone(),
+        );
+
+        //TODO
+        best_bundles.load_transactions(ctx.block_number(), 1);
+
         let interval = self.config.specific.interval;
         let (tx, mut rx) = mpsc::channel((self.config.flashblocks_per_block() + 1) as usize);
         let mut fb_cancel = block_cancel.child_token();
@@ -546,7 +542,7 @@ where
         info: &mut ExecutionInfo<ExtraExecutionInfo>,
         state: &mut State<DB>,
         state_provider: impl reth::providers::StateProvider + Clone,
-        best_txs: &mut NextBestFlashblocksTxs<Pool>,
+        best_bundles: &mut BestFlashblocksBundles<Pool>,
         block_cancel: &CancellationToken,
         best_payload: &BlockCell<OpBuiltPayload>,
         span: &tracing::Span,
@@ -605,13 +601,11 @@ where
         }
 
         let best_txs_start_time = Instant::now();
-        best_txs.refresh_iterator(
-            BestPayloadTransactions::new(
-                self.pool
-                    .best_transactions_with_attributes(ctx.best_transaction_attributes()),
-            ),
-            ctx.flashblock_index(),
+        best_bundles.load_transactions(
+            ctx.block_number(),
+            flashblock_index,
         );
+
         let transaction_pool_fetch_time = best_txs_start_time.elapsed();
         ctx.metrics
             .transaction_pool_fetch_duration
@@ -621,20 +615,14 @@ where
             .set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
-        ctx.execute_best_transactions(
+        let bundles_processed = ctx.execute_best_bundles(
             info,
             state,
-            best_txs,
+            best_bundles,
             target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_per_batch,
-        )?;
-        // Extract last transactions
-        let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
-            .to_vec()
-            .iter()
-            .map(|tx| tx.tx_hash())
-            .collect::<Vec<_>>();
-        best_txs.mark_commited(new_transactions);
+            target_da_for_batch,
+        )
+        .wrap_err("failed to execute best transactions")?;
 
         // We got block cancelled, we won't need anything from the block at this point
         // Caution: this assume that block cancel token only cancelled when new FCU is received
@@ -711,7 +699,11 @@ where
                 let flashblock_byte_size = self
                     .ws_pub
                     .publish(&fb_payload)
-                    .map_err(PayloadBuilderError::other)?;
+                    .wrap_err("failed to publish flashblock via websocket")?;
+
+                best_bundles.on_new_flashblock(new_payload.block().number, &fb_payload, bundles_processed);
+
+                best_payload.set(new_payload);
 
                 // Record flashblock build duration
                 ctx.metrics

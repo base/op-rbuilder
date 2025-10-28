@@ -4,6 +4,7 @@ use core::fmt::Debug;
 use derive_more::Display;
 use op_revm::OpTransactionError;
 use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
+use tips_core::BundleWithMetadata;
 
 #[derive(Debug, Display)]
 pub enum TxnExecutionResult {
@@ -104,6 +105,38 @@ impl<T: Debug + Default> ExecutionInfo<T> {
                 block_gas_limit,
             ));
         }
+        Ok(())
+    }
+
+    pub fn is_bundle_over_limit(
+        &self,
+        block_gas_limit: u64,
+        tx_data_limit: Option<u64>,
+        block_data_limit: Option<u64>,
+        bundle: &BundleWithMetadata,
+    ) -> Result<(), TxnExecutionResult> {
+
+        // TODO: Maybe this should check per transaction settings
+        if tx_data_limit.is_some_and(|da_limit| bundle.da_size() > da_limit) {
+            return Err(TxnExecutionResult::TransactionDALimitExceeded);
+        }
+
+        if block_data_limit.is_some_and(|da_limit| self.cumulative_da_bytes_used + bundle.da_size() > da_limit) {
+            return Err(TxnExecutionResult::BlockDALimitExceeded(
+                self.cumulative_da_bytes_used,
+                bundle.da_size(),
+                block_data_limit.unwrap_or_default(),
+            ));
+        }
+
+        if self.cumulative_gas_used + bundle.gas_limit() > block_gas_limit {
+            return Err(TxnExecutionResult::TransactionGasLimitExceeded(
+                self.cumulative_gas_used,
+                bundle.gas_limit(),
+                block_gas_limit,
+            ));
+        }
+
         Ok(())
     }
 }

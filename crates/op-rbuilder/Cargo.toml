@@ -12,6 +12,11 @@ default-run = "op-rbuilder"
 workspace = true
 
 [dependencies]
+rdkafka.workspace = true
+tips-core.workspace = true
+tips-audit.workspace = true
+tips-bundle-pool.workspace = true
+
 reth.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-cli.workspace = true

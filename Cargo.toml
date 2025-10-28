@@ -43,6 +43,11 @@ incremental = false
 unreachable_pub = "warn"
 
 [workspace.dependencies]
+tips-core = { path = "../tips/crates/core" }
+tips-audit = { path = "../tips/crates/audit" }
+tips-bundle-pool = { path = "../tips/crates/bundle-pool" }
+rdkafka = { version = "0.37.0", features = ["libz-static", "ssl-vendored"] }
+
 reth = { git = "https://github.com/paradigmxyz/reth", version = "1.9.0" }
 reth-chain-state = { git = "https://github.com/paradigmxyz/reth", version = "1.9.0" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", version = "1.9.0" }

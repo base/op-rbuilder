@@ -18,9 +18,14 @@ use reth_node_builder::{BuilderContext, components::PayloadServiceBuilder};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
-use std::sync::Arc;
+use std::sync::{Arc};
+use tips_bundle_pool::InMemoryBundlePool;
+use tracing::{warn};
 
-pub struct FlashblocksServiceBuilder(pub BuilderConfig<FlashblocksConfig>);
+pub struct FlashblocksServiceBuilder {
+    pub config: BuilderConfig<FlashblocksConfig>,
+    pub bundle_store: InMemoryBundlePool,
+}
 
 impl FlashblocksServiceBuilder {
     fn spawn_payload_builder_service<Node, Pool, BuilderTx>(
@@ -40,9 +45,10 @@ impl FlashblocksServiceBuilder {
             OpEvmConfig::optimism(ctx.chain_spec()),
             pool,
             ctx.provider().clone(),
-            self.0.clone(),
+            self.config.clone(),
             builder_tx,
             once_lock.clone(),
+            self.bundle_store.clone(),
         )?;
 
         let payload_job_config = BasicPayloadJobGeneratorConfig::default();
@@ -53,7 +59,7 @@ impl FlashblocksServiceBuilder {
             payload_job_config,
             payload_builder,
             true,
-            self.0.block_time_leeway,
+            self.config.block_time_leeway,
         );
 
         let (payload_service, payload_builder) =
@@ -88,7 +94,7 @@ where
             match bootstrap_flashtestations(self.0.flashtestations_config.clone(), ctx).await {
                 Ok(builder_tx) => Some(builder_tx),
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to bootstrap flashtestations, builder will not include flashtestations txs");
+                    warn!(error = %e, "Failed to bootstrap flashtestations, builder will not include flashtestations txs");
                     None
                 }
             }
@@ -97,7 +103,7 @@ where
         };
 
         if let Some(flashblocks_number_contract_address) =
-            self.0.specific.flashblocks_number_contract_address
+            self.config.specific.flashblocks_number_contract_address
         {
             self.spawn_payload_builder_service(
                 ctx,
