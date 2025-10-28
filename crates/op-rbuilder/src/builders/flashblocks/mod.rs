@@ -1,9 +1,9 @@
+use tips_bundle_pool::InMemoryBundlePool;
 use super::BuilderConfig;
 use crate::traits::{NodeBounds, PoolBounds};
 use config::FlashblocksConfig;
 use service::FlashblocksServiceBuilder;
 
-mod best_txs;
 mod builder_tx;
 mod config;
 mod ctx;
@@ -12,6 +12,7 @@ mod payload;
 mod payload_handler;
 mod service;
 mod wspub;
+mod best_bundles;
 
 /// Block building strategy that progressively builds chunks of a block and makes them available
 /// through a websocket update, then merges them into a full block every chain block time.
@@ -28,11 +29,15 @@ impl super::PayloadBuilder for FlashblocksBuilder {
 
     fn new_service<Node, Pool>(
         config: BuilderConfig<Self::Config>,
+        bundle_store: InMemoryBundlePool,
     ) -> eyre::Result<Self::ServiceBuilder<Node, Pool>>
     where
         Node: NodeBounds,
         Pool: PoolBounds,
     {
-        Ok(FlashblocksServiceBuilder(config))
+        Ok(FlashblocksServiceBuilder{
+            config,
+            bundle_store,
+        })
     }
 }

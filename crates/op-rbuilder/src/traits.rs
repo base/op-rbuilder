@@ -6,6 +6,7 @@ use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 use reth_payload_util::PayloadTransactions;
 use reth_provider::{BlockReaderIdExt, ChainSpecProvider, StateProviderFactory};
 use reth_transaction_pool::TransactionPool;
+use tips_core::BundleWithMetadata;
 
 use crate::tx::FBPoolTransaction;
 
@@ -75,6 +76,15 @@ impl<T> ClientBounds for T where
         + BlockReaderIdExt<Header = Header>
         + Clone
 {
+}
+
+pub trait BundleBounds {
+    fn next(
+        &mut self,
+        ctx: (),
+    ) -> Option<&BundleWithMetadata>;
+
+    fn mark_invalid(&mut self, bundle: &BundleWithMetadata);
 }
 
 pub trait PayloadTxsBounds:

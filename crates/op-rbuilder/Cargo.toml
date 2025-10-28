@@ -12,6 +12,10 @@ default-run = "op-rbuilder"
 workspace = true
 
 [dependencies]
+rdkafka.workspace = true
+tips-core.workspace = true
+tips-audit.workspace = true
+tips-bundle-pool.workspace = true
 p2p = { path = "../p2p" }
 
 reth.workspace = true

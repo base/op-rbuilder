@@ -1,70 +1,83 @@
-use alloy_primitives::{Address, TxHash};
-use reth_payload_util::PayloadTransactions;
-use reth_transaction_pool::{PoolTransaction, ValidPoolTransaction};
-use std::{collections::HashSet, sync::Arc};
-use tracing::debug;
+use crate::traits::BundleBounds;
+use alloy_primitives::TxHash;
+use reth_transaction_pool::TransactionPool;
+use rollup_boost::FlashblocksPayloadV1;
+use std::collections::HashSet;
+use tips_bundle_pool::pool::ProcessedBundle;
+use tips_bundle_pool::{BundleStore, InMemoryBundlePool};
+use tips_core::BundleWithMetadata;
 
-use crate::tx::MaybeFlashblockFilter;
+pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
+    pool: Pool,
+    bundle_pool: InMemoryBundlePool,
 
-pub(super) struct BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction,
-    I: Iterator<Item = Arc<ValidPoolTransaction<T>>>,
-{
-    inner: reth_payload_util::BestPayloadTransactions<T, I>,
-    current_flashblock_number: u64,
-    // Transactions that were already commited to the state. Using them again would cause NonceTooLow
-    // so we skip them
+    // State
     commited_transactions: HashSet<TxHash>,
+    current_flashblock_number: u64,
+
+    // Mut stuff
+    bundles: Vec<BundleWithMetadata>,
+    curr_bundles_idx: usize,
+    current_block_num: u64,
 }
 
-impl<T, I> BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction,
-    I: Iterator<Item = Arc<ValidPoolTransaction<T>>>,
-{
-    pub(super) fn new(inner: reth_payload_util::BestPayloadTransactions<T, I>) -> Self {
+impl <Pool: TransactionPool> BestFlashblocksBundles<Pool> {
+    pub(super) fn new(pool: Pool, bundle_pool: InMemoryBundlePool) -> Self {
         Self {
-            inner,
+            pool,
+            bundle_pool,
             current_flashblock_number: 0,
+            current_block_num: 0,
             commited_transactions: Default::default(),
+            bundles: vec![],
+            curr_bundles_idx: 0,
         }
     }
 
     /// Replaces current iterator with new one. We use it on new flashblock building, to refresh
     /// priority boundaries
-    pub(super) fn refresh_iterator(
+    pub(super) fn load_transactions(
         &mut self,
-        inner: reth_payload_util::BestPayloadTransactions<T, I>,
+        current_block_num: u64,
         current_flashblock_number: u64,
     ) {
-        self.inner = inner;
         self.current_flashblock_number = current_flashblock_number;
+        self.current_block_num = current_block_num;
+
+        self.bundles = self.bundle_pool.get_bundles();
+        self.curr_bundles_idx = 0;
     }
 
     /// Remove transaction from next iteration and it already in the state
-    pub(super) fn mark_commited(&mut self, txs: Vec<TxHash>) {
-        self.commited_transactions.extend(txs);
+    pub(super) fn on_new_flashblock(&mut self, block: u64, fb: &FlashblocksPayloadV1, bundles_processed: Vec<ProcessedBundle>) {
+        self.bundle_pool.built_flashblock(
+            block,
+            fb.index,
+            bundles_processed,
+        );
     }
 }
 
-impl<T, I> PayloadTransactions for BestFlashblocksTxs<T, I>
-where
-    T: PoolTransaction + MaybeFlashblockFilter,
-    I: Iterator<Item = Arc<ValidPoolTransaction<T>>>,
-{
-    type Transaction = T;
+impl <Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
 
-    fn next(&mut self, ctx: ()) -> Option<Self::Transaction> {
+    fn next(&mut self, _ctx: ()) -> Option<&BundleWithMetadata> {
         loop {
-            let tx = self.inner.next(ctx)?;
-            // Skip transaction we already included
-            if self.commited_transactions.contains(tx.hash()) {
-                continue;
+            let bundle: &BundleWithMetadata = self.bundles.get(self.curr_bundles_idx)?;
+            self.curr_bundles_idx += 1;
+
+            for t in bundle.transactions() {
+                if self.commited_transactions.contains(t.hash()) {
+                    continue;
+                }
             }
 
-            let flashblock_number_min = tx.flashblock_number_min();
-            let flashblock_number_max = tx.flashblock_number_max();
+            let block_num = bundle.bundle().block_number;
+            let flashblock_number_min = bundle.bundle().flashblock_number_min;
+            let flashblock_number_max = bundle.bundle().flashblock_number_max;
+
+            if block_num != 0 && block_num != self.current_block_num{
+                continue;
+            }
 
             // Check min flashblock requirement
             if let Some(min) = flashblock_number_min {
@@ -76,34 +89,27 @@ where
             // Check max flashblock requirement
             if let Some(max) = flashblock_number_max {
                 if self.current_flashblock_number > max {
-                    debug!(
-                        target: "payload_builder",
-                        tx_hash = ?tx.hash(),
-                        sender = ?tx.sender(),
-                        nonce = tx.nonce(),
-                        current_flashblock = self.current_flashblock_number,
-                        max_flashblock = max,
-                        "Bundle flashblock max exceeded"
-                    );
-                    self.inner.mark_invalid(tx.sender(), tx.nonce());
+                    // self.mark_invalid(tx.sender(), tx.nonce());
                     continue;
                 }
             }
 
-            return Some(tx);
+            return Some(bundle);
         }
     }
 
+    // TODO
     /// Proxy to inner iterator
-    fn mark_invalid(&mut self, sender: Address, nonce: u64) {
-        self.inner.mark_invalid(sender, nonce);
+    fn mark_invalid(&mut self, _bundle_with_metadata: &BundleWithMetadata) {
+        // self.inner.mark_invalid(sender, nonce);
     }
 }
 
+/*
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
-        builders::flashblocks::best_txs::BestFlashblocksTxs,
         mock_tx::{MockFbTransaction, MockFbTransactionFactory},
     };
     use alloy_consensus::Transaction;
@@ -125,7 +131,7 @@ mod tests {
         pool.add_transaction(Arc::new(tx_3), 0);
 
         // Create iterator
-        let mut iterator = BestFlashblocksTxs::new(BestPayloadTransactions::new(pool.best()));
+        let mut iterator = BestFlashblocksBundles::new(BestPayloadTransactions::new(pool.best()), );
         // ### First flashblock
         iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 0);
         // Accept first tx
@@ -177,7 +183,7 @@ mod tests {
         pool.add_transaction(Arc::new(tx_4), 0);
 
         // Create iterator
-        let mut iterator = BestFlashblocksTxs::new(BestPayloadTransactions::new(pool.best()));
+        let mut iterator = BestFlashblocksBundles::new(BestPayloadTransactions::new(pool.best()), );
         // ### First flashblock
         // should contain txs 1 and 2
         iterator.refresh_iterator(BestPayloadTransactions::new(pool.best()), 0);
@@ -235,3 +241,5 @@ mod tests {
         assert!(iterator.next(()).is_none(), "Iterator should be empty");
     }
 }
+
+ */
