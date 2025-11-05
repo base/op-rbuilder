@@ -1,3 +1,10 @@
+use crate::{
+    args::OpRbuilderArgs,
+    flashtestations::args::FlashtestationsArgs,
+    gas_limiter::args::GasLimiterArgs,
+    traits::{NodeBounds, PoolBounds},
+    tx_signer::Signer,
+};
 use core::{
     convert::{Infallible, TryFrom},
     fmt::Debug,
@@ -8,13 +15,6 @@ use reth_optimism_evm::OpEvmConfig;
 use reth_optimism_payload_builder::config::{OpDAConfig, OpGasLimitConfig};
 
 use tips_bundle_pool::InMemoryBundlePool;
-use crate::{
-    args::OpRbuilderArgs,
-    flashtestations::args::FlashtestationsArgs,
-    gas_limiter::args::GasLimiterArgs,
-    traits::{NodeBounds, PoolBounds},
-    tx_signer::Signer,
-};
 
 mod builder_tx;
 mod context;

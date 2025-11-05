@@ -1,8 +1,8 @@
-use tips_bundle_pool::InMemoryBundlePool;
 use crate::{
     builders::standard::service::StandardServiceBuilder,
     traits::{NodeBounds, PoolBounds},
 };
+use tips_bundle_pool::InMemoryBundlePool;
 
 use super::BuilderConfig;
 

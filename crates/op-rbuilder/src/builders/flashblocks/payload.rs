@@ -4,7 +4,7 @@ use crate::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
-        flashblocks::{config::FlashBlocksConfigExt},
+        flashblocks::{best_bundles::BestFlashblocksBundles, config::FlashBlocksConfigExt},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
     },
     gas_limiter::AddressGasLimiter,
@@ -48,11 +48,10 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
-use tips_bundle_pool::{InMemoryBundlePool};
+use tips_bundle_pool::InMemoryBundlePool;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, metadata::Level, span, warn};
-use crate::builders::flashblocks::best_bundles::BestFlashblocksBundles;
 
 #[derive(Debug, Default)]
 struct ExtraExecutionInfo {
@@ -428,10 +427,8 @@ where
         ctx.extra_ctx.da_per_batch = da_per_batch;
 
         // Create best_transaction iterator
-        let mut best_bundles = BestFlashblocksBundles::new(
-            self.pool.clone(),
-            self.bundle_pool.clone(),
-        );
+        let mut best_bundles =
+            BestFlashblocksBundles::new(self.pool.clone(), self.bundle_pool.clone());
 
         //TODO
         best_bundles.load_transactions(ctx.block_number(), 1);
@@ -699,7 +696,11 @@ where
                     .publish(&fb_payload)
                     .map_err(|e| PayloadBuilderError::other(e))?;
 
-                best_bundles.on_new_flashblock(new_payload.block().number, &fb_payload, bundles_processed);
+                best_bundles.on_new_flashblock(
+                    new_payload.block().number,
+                    &fb_payload,
+                    bundles_processed,
+                );
 
                 // Record flashblock build duration
                 ctx.metrics

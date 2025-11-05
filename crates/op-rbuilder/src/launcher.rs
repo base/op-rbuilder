@@ -1,4 +1,4 @@
-use eyre::{eyre, Result};
+use eyre::{Result, eyre};
 use reth_optimism_rpc::OpEthApiBuilder;
 
 use crate::{
@@ -11,12 +11,13 @@ use crate::{
     tx::FBPooledTransaction,
 };
 use core::fmt::Debug;
-use std::marker::PhantomData;
-use std::sync::Arc;
+use futures_util::TryStreamExt;
 use moka::future::Cache;
+use rdkafka::{ClientConfig, producer::FutureProducer};
 use reth::builder::{NodeBuilder, WithLaunchContext};
 use reth_cli_commands::launcher::Launcher;
 use reth_db::mdbx::DatabaseEnv;
+use reth_exex::ExExEvent;
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_cli::chainspec::OpChainSpecParser;
 use reth_optimism_node::{
@@ -24,14 +25,10 @@ use reth_optimism_node::{
     node::{OpAddOns, OpAddOnsBuilder, OpEngineValidatorBuilder, OpPoolBuilder},
 };
 use reth_transaction_pool::TransactionPool;
-use futures_util::TryStreamExt;
-use rdkafka::ClientConfig;
-use rdkafka::producer::FutureProducer;
-use reth_exex::ExExEvent;
-use tips_audit::{connect_audit_to_publisher, BundleEvent, KafkaBundleEventPublisher};
-use tips_bundle_pool::{BundleStore, InMemoryBundlePool, KafkaBundleSource};
-use tips_bundle_pool::source::BundleSource;
-use tips_core::BundleWithMetadata;
+use std::{marker::PhantomData, sync::Arc};
+use tips_audit::{BundleEvent, KafkaBundleEventPublisher, connect_audit_to_publisher};
+use tips_bundle_pool::{BundleStore, InMemoryBundlePool, KafkaBundleSource, source::BundleSource};
+use tips_core::AcceptedBundle;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
@@ -169,13 +166,11 @@ where
                         while let Some(note) = ctx.notifications.try_next().await? {
                             if let Some(committed) = note.committed_chain() {
                                 for b in committed.blocks_iter() {
-                                    bundle_pool_copy.on_new_block(
-                                        b.number,
-                                        b.hash());
+                                    bundle_pool_copy.on_new_block(b.number, b.hash());
                                 }
-                                let _ = ctx.events.send(ExExEvent::FinishedHeight(
-                                    committed.tip().num_hash(),
-                                ));
+                                let _ = ctx
+                                    .events
+                                    .send(ExExEvent::FinishedHeight(committed.tip().num_hash()));
                             }
                         }
                         Ok(())
@@ -219,9 +214,8 @@ where
 }
 
 impl<B> BuilderLauncher<B> {
-
     fn setup_bundle_store(&self) -> Result<InMemoryBundlePool> {
-        let (bundle_tx, mut bundle_rx) = mpsc::unbounded_channel::<BundleWithMetadata>();
+        let (bundle_tx, mut bundle_rx) = mpsc::unbounded_channel::<AcceptedBundle>();
         let (audit_tx, audit_rx) = mpsc::unbounded_channel::<BundleEvent>();
 
         // TODO: Load from file
@@ -231,10 +225,8 @@ impl<B> BuilderLauncher<B> {
             .create::<FutureProducer>()
             .expect("Failed to create Kafka FutureProducer");
 
-        let audit_publisher = KafkaBundleEventPublisher::new(
-            kafka_producer,
-            "tips-audit".to_string(),
-        );
+        let audit_publisher =
+            KafkaBundleEventPublisher::new(kafka_producer, "tips-audit".to_string());
         connect_audit_to_publisher(audit_rx, audit_publisher);
 
         // TODO: Load from file
@@ -246,13 +238,10 @@ impl<B> BuilderLauncher<B> {
             .set("enable.auto.commit", "true")
             .set("auto.offset.reset", "earliest");
 
-        let bundle_source = Arc::new(KafkaBundleSource::new(
-            bundle_source_config,
-            "tips-ingress".to_string(),
-            bundle_tx
-        ).map_err(|e| {
-            eyre!(e.to_string())
-        })?);
+        let bundle_source = Arc::new(
+            KafkaBundleSource::new(bundle_source_config, "tips-ingress".to_string(), bundle_tx)
+                .map_err(|e| eyre!(e.to_string()))?,
+        );
 
         tokio::spawn(async move {
             if let Err(e) = bundle_source.run().await {

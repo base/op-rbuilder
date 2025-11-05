@@ -46,6 +46,8 @@ use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use tips_audit::BundleEvent;
+use tips_bundle_pool::InMemoryBundlePool;
 
 /// Represents a type that emulates a local in-process instance of the OP builder node.
 /// This node uses IPC as the communication channel for the RPC server Engine API.
@@ -109,6 +111,8 @@ impl LocalInstance {
             .with_gas_limit_config(gas_limit_config)
             .build();
 
+        let (audit_tx, _) = mpsc::unbounded_channel::<BundleEvent>();
+        let bundle_pool = InMemoryBundlePool::new(audit_tx, "op-rbuilder-1".to_string());
         let node_builder = NodeBuilder::<_, OpChainSpec>::new(config.clone())
             .with_database(create_test_db(config.clone()))
             .with_launch_context(task_manager.executor())
@@ -117,7 +121,7 @@ impl LocalInstance {
                 op_node
                     .components()
                     .pool(pool_component(&args))
-                    .payload(P::new_service(builder_config)?),
+                    .payload(P::new_service(builder_config, bundle_pool)?),
             )
             .with_add_ons(addons)
             .extend_rpc_modules(move |ctx| {
