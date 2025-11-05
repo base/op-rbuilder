@@ -36,8 +36,11 @@ pub fn launch() -> Result<()> {
         _ => Default::default(),
     };
 
+    #[cfg(not(feature = "telemetry"))]
     let cli_app = cli.configure();
 
+    #[cfg(feature = "telemetry")]
+    let mut cli_app = cli.configure();
     #[cfg(feature = "telemetry")]
     {
         use crate::primitives::telemetry::setup_telemetry_layer;

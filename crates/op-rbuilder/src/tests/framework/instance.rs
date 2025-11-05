@@ -415,10 +415,10 @@ impl FlashblocksListener {
     pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
         let tx_hash_str = format!("{tx_hash:#x}");
         self.flashblocks.lock().iter().any(|fb| {
-            if let Some(receipts) = fb.metadata.get("receipts") {
-                if let Some(receipts_obj) = receipts.as_object() {
-                    return receipts_obj.contains_key(&tx_hash_str);
-                }
+            if let Some(receipts) = fb.metadata.get("receipts")
+                && let Some(receipts_obj) = receipts.as_object()
+            {
+                return receipts_obj.contains_key(&tx_hash_str);
             }
             false
         })
@@ -428,12 +428,11 @@ impl FlashblocksListener {
     pub fn find_transaction_flashblock(&self, tx_hash: &B256) -> Option<u64> {
         let tx_hash_str = format!("{tx_hash:#x}");
         self.flashblocks.lock().iter().find_map(|fb| {
-            if let Some(receipts) = fb.metadata.get("receipts") {
-                if let Some(receipts_obj) = receipts.as_object() {
-                    if receipts_obj.contains_key(&tx_hash_str) {
-                        return Some(fb.index);
-                    }
-                }
+            if let Some(receipts) = fb.metadata.get("receipts")
+                && let Some(receipts_obj) = receipts.as_object()
+                && receipts_obj.contains_key(&tx_hash_str)
+            {
+                return Some(fb.index);
             }
             None
         })

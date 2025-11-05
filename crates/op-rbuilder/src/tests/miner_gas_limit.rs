@@ -1,10 +1,7 @@
-use std::time::Duration;
-
 use crate::tests::{BlockTransactionsExt, LocalInstance};
 use alloy_provider::Provider;
 use macros::{if_flashblocks, if_standard, rb_test};
 use reth_primitives_traits::constants::MEGAGAS;
-use tokio::time::sleep;
 /// This test ensures that the miner gas limit is respected
 /// We will set the limit to 60,000 and see that the builder will not include any transactions
 #[rb_test]

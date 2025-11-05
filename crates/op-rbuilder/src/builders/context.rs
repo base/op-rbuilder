@@ -510,12 +510,12 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
             // add gas used by the transaction to cumulative gas used, before creating the
             // receipt
-            if let Some(max_gas_per_txn) = self.max_gas_per_txn {
-                if gas_used > max_gas_per_txn {
-                    log_txn(TxnExecutionResult::MaxGasUsageExceeded);
-                    best_txs.mark_invalid(tx.signer(), tx.nonce());
-                    continue;
-                }
+            if let Some(max_gas_per_txn) = self.max_gas_per_txn
+                && gas_used > max_gas_per_txn
+            {
+                log_txn(TxnExecutionResult::MaxGasUsageExceeded);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
             }
 
             info.cumulative_gas_used += gas_used;
