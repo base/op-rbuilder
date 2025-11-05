@@ -23,9 +23,9 @@ use reth_node_builder::{BuilderContext, components::PayloadServiceBuilder};
 use reth_optimism_evm::OpEvmConfig;
 use reth_payload_builder::{PayloadBuilderHandle, PayloadBuilderService};
 use reth_provider::CanonStateSubscriptions;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tips_bundle_pool::InMemoryBundlePool;
-use tracing::{warn};
+use tracing::warn;
 
 pub struct FlashblocksServiceBuilder {
     pub config: BuilderConfig<FlashblocksConfig>,

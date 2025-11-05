@@ -4,7 +4,7 @@ use crate::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
         context::OpPayloadBuilderCtx,
-        flashblocks::{config::FlashBlocksConfigExt},
+        flashblocks::{best_bundles::BestFlashblocksBundles, config::FlashBlocksConfigExt},
         generator::{BlockCell, BuildArguments, PayloadBuilder},
     },
     gas_limiter::AddressGasLimiter,
@@ -48,11 +48,10 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use tips_bundle_pool::{InMemoryBundlePool};
+use tips_bundle_pool::InMemoryBundlePool;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, metadata::Level, span, warn};
-use crate::builders::flashblocks::best_bundles::BestFlashblocksBundles;
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct FlashblocksExecutionInfo {
@@ -450,10 +449,8 @@ where
             .map_err(|e| PayloadBuilderError::Other(e.into()))?;
 
         // Create best_transaction iterator
-        let mut best_bundles = BestFlashblocksBundles::new(
-            self.pool.clone(),
-            self.bundle_pool.clone(),
-        );
+        let mut best_bundles =
+            BestFlashblocksBundles::new(self.pool.clone(), self.bundle_pool.clone());
 
         //TODO
         best_bundles.load_transactions(ctx.block_number(), 1);
@@ -629,10 +626,7 @@ where
         }
 
         let best_txs_start_time = Instant::now();
-        best_bundles.load_transactions(
-            ctx.block_number(),
-            flashblock_index,
-        );
+        best_bundles.load_transactions(ctx.block_number(), flashblock_index);
 
         let transaction_pool_fetch_time = best_txs_start_time.elapsed();
         ctx.metrics
@@ -643,14 +637,15 @@ where
             .set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
-        let bundles_processed = ctx.execute_best_bundles(
-            info,
-            state,
-            best_bundles,
-            target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-        )
-        .wrap_err("failed to execute best transactions")?;
+        let bundles_processed = ctx
+            .execute_best_bundles(
+                info,
+                state,
+                best_bundles,
+                target_gas_for_batch.min(ctx.block_gas_limit()),
+                target_da_for_batch,
+            )
+            .wrap_err("failed to execute best transactions")?;
 
         // We got block cancelled, we won't need anything from the block at this point
         // Caution: this assume that block cancel token only cancelled when new FCU is received
@@ -725,7 +720,11 @@ where
                     .await
                     .wrap_err("failed to send built payload to handler")?;
 
-                best_bundles.on_new_flashblock(new_payload.block().number, &fb_payload, bundles_processed);
+                best_bundles.on_new_flashblock(
+                    new_payload.block().number,
+                    &fb_payload,
+                    bundles_processed,
+                );
 
                 best_payload.set(new_payload);
 

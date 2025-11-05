@@ -1,6 +1,8 @@
-use alloy_consensus::{Eip658Value, Transaction, conditional::BlockConditionalAttributes};
+use alloy_consensus::{
+    Eip658Value, Transaction, conditional::BlockConditionalAttributes, transaction::TxHashRef,
+};
 use alloy_eips::Typed2718;
-use alloy_evm::{Database};
+use alloy_evm::Database;
 use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_primitives::{BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
@@ -32,20 +34,19 @@ use reth_revm::{State, context::Block};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
 use std::{sync::Arc, time::Instant};
-use alloy_consensus::transaction::{SignerRecoverable, TxHashRef};
 use tips_bundle_pool::pool::{Action, ProcessedBundle};
+use tips_core::{BundleExtensions, BundleTxs};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, info, trace};
 
 use crate::{
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
-    traits::PayloadTxsBounds,
+    traits::{BundleBounds, PayloadTxsBounds},
     tx::MaybeRevertingTransaction,
     tx_signer::Signer,
 };
-use crate::traits::BundleBounds;
 
 /// Container type that holds all necessities to build a new payload.
 #[derive(Debug)]
@@ -354,20 +355,20 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             block_gas_limit = ?block_gas_limit,
         );
 
-        while let Some(bundle_with_metadata) = best_bundles.next(()) {
-            let bundle_with_metadata = bundle_with_metadata.clone();
+        while let Some(accepted_bundle) = best_bundles.next(()) {
+            let accepted_bundle = accepted_bundle.clone();
 
             // ensure we still have capacity for this bundle
             if let Err(_result) = info.is_bundle_over_limit(
                 block_gas_limit,
                 tx_da_limit,
                 block_da_limit,
-                &bundle_with_metadata,
+                &accepted_bundle,
             ) {
                 // we can't fit this bundle into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
                 // the iterator before we can continue
-                best_bundles.mark_invalid(&bundle_with_metadata);
+                best_bundles.mark_invalid(&accepted_bundle);
                 continue;
             }
 
@@ -377,38 +378,27 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             }
 
             // TODO: Extract into execute function
-            for txn in bundle_with_metadata.transactions() {
+            for txn in accepted_bundle.clone().transactions() {
                 // TODO: limit
                 // if let Some(max_gas_per_txn) = self.max_gas_per_txn {
                 //     if gas_used > max_gas_per_txn {
                 //         TODO
                 //         Break out of this bundle, don't commit
                 //         Drop this bundle
-                        // best_bundles.mark_invalid(&bundle_with_metadata);
-                        // continue;
-                    // }
+                // best_bundles.mark_invalid(&bundle_with_metadata);
+                // continue;
+                // }
                 // }
 
                 if txn.is_eip4844() || txn.is_deposit() {
                     // TODO
                     // Break out of this bundle, don't commit
                     // Drop this bundle
-                    best_bundles.mark_invalid(&bundle_with_metadata);
+                    best_bundles.mark_invalid(&accepted_bundle);
                     continue;
                 }
 
-                let recovered_tx = match SignerRecoverable::try_into_recovered(txn.clone()) {
-                    Ok(tx) => tx,
-                    Err(e) => {
-                        error!(message = "unable to recover txn", err=%e.to_string());
-                        // TODO
-                        // Break out of this bundle, don't commit
-                        // Drop this bundle
-                        continue;
-                    }
-                };
-
-                let ResultAndState { result, state } = match evm.transact(&recovered_tx) {
+                let ResultAndState { result, state } = match evm.transact(txn.clone()) {
                     Ok(res) => res,
                     Err(err) => {
                         if let Some(err) = err.as_invalid_tx_err() {
@@ -422,7 +412,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                                 // log_txn(TxnExecutionResult::InternalError(err.clone()));
                                 trace!(target: "payload_builder", %err, ?txn, "skipping invalid transaction and its descendants");
                                 // TODO
-                                best_bundles.mark_invalid(&bundle_with_metadata);
+                                best_bundles.mark_invalid(&accepted_bundle);
                             }
 
                             // TODO
@@ -443,7 +433,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 info.cumulative_gas_used += gas_used;
 
                 let ctx = ReceiptBuilderCtx {
-                    tx: txn,
+                    tx: txn.inner(),
                     evm: &evm,
                     result,
                     state: &state,
@@ -461,14 +451,17 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 info.total_fees += U256::from(miner_fee) * U256::from(gas_used);
 
                 // append sender and transaction to the respective lists
-                info.executed_senders.push(recovered_tx.signer());
-                info.executed_transactions.push(txn.clone());
+                info.executed_senders.push(txn.signer());
+                info.executed_transactions.push(txn.clone().into_inner());
             }
 
             // TODO: confirm this is safe to do
-            info.cumulative_da_bytes_used += bundle_with_metadata.da_size();
+            info.cumulative_da_bytes_used += accepted_bundle.clone().da_size();
 
-            processing_result.push(ProcessedBundle::new(*bundle_with_metadata.uuid(), Action::Included));
+            processing_result.push(ProcessedBundle::new(
+                *accepted_bundle.uuid(),
+                Action::Included,
+            ));
         }
 
         Ok(processing_result)

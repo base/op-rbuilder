@@ -3,9 +3,8 @@ use alloy_primitives::TxHash;
 use reth_transaction_pool::TransactionPool;
 use rollup_boost::FlashblocksPayloadV1;
 use std::collections::HashSet;
-use tips_bundle_pool::pool::ProcessedBundle;
-use tips_bundle_pool::{BundleStore, InMemoryBundlePool};
-use tips_core::BundleWithMetadata;
+use tips_bundle_pool::{BundleStore, InMemoryBundlePool, pool::ProcessedBundle};
+use tips_core::{AcceptedBundle, BundleTxs};
 
 pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
     pool: Pool,
@@ -16,12 +15,12 @@ pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
     current_flashblock_number: u64,
 
     // Mut stuff
-    bundles: Vec<BundleWithMetadata>,
+    bundles: Vec<AcceptedBundle>,
     curr_bundles_idx: usize,
     current_block_num: u64,
 }
 
-impl <Pool: TransactionPool> BestFlashblocksBundles<Pool> {
+impl<Pool: TransactionPool> BestFlashblocksBundles<Pool> {
     pub(super) fn new(pool: Pool, bundle_pool: InMemoryBundlePool) -> Self {
         Self {
             pool,
@@ -49,33 +48,34 @@ impl <Pool: TransactionPool> BestFlashblocksBundles<Pool> {
     }
 
     /// Remove transaction from next iteration and it already in the state
-    pub(super) fn on_new_flashblock(&mut self, block: u64, fb: &FlashblocksPayloadV1, bundles_processed: Vec<ProcessedBundle>) {
-        self.bundle_pool.built_flashblock(
-            block,
-            fb.index,
-            bundles_processed,
-        );
+    pub(super) fn on_new_flashblock(
+        &mut self,
+        block: u64,
+        fb: &FlashblocksPayloadV1,
+        bundles_processed: Vec<ProcessedBundle>,
+    ) {
+        self.bundle_pool
+            .built_flashblock(block, fb.index, bundles_processed);
     }
 }
 
-impl <Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
-
-    fn next(&mut self, _ctx: ()) -> Option<&BundleWithMetadata> {
+impl<Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
+    fn next(&mut self, _ctx: ()) -> Option<&AcceptedBundle> {
         loop {
-            let bundle: &BundleWithMetadata = self.bundles.get(self.curr_bundles_idx)?;
+            let bundle: &AcceptedBundle = self.bundles.get(self.curr_bundles_idx)?;
             self.curr_bundles_idx += 1;
 
-            for t in bundle.transactions() {
+            for t in bundle.clone().transactions() {
                 if self.commited_transactions.contains(t.hash()) {
                     continue;
                 }
             }
 
-            let block_num = bundle.bundle().block_number;
-            let flashblock_number_min = bundle.bundle().flashblock_number_min;
-            let flashblock_number_max = bundle.bundle().flashblock_number_max;
+            let block_num = bundle.block_number;
+            let flashblock_number_min = bundle.flashblock_number_min;
+            let flashblock_number_max = bundle.flashblock_number_max;
 
-            if block_num != 0 && block_num != self.current_block_num{
+            if block_num != 0 && block_num != self.current_block_num {
                 continue;
             }
 
@@ -100,7 +100,7 @@ impl <Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
 
     // TODO
     /// Proxy to inner iterator
-    fn mark_invalid(&mut self, _bundle_with_metadata: &BundleWithMetadata) {
+    fn mark_invalid(&mut self, _bundle: &AcceptedBundle) {
         // self.inner.mark_invalid(sender, nonce);
     }
 }
