@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use tips_bundle_pool::pool::ProcessedBundle;
 use tips_bundle_pool::{BundleStore, InMemoryBundlePool};
 use tips_core::BundleWithMetadata;
+use tracing::debug;
 
 pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
     pool: Pool,

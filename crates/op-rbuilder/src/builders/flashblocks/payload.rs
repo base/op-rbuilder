@@ -29,7 +29,6 @@ use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpEngineTypes, OpPayloadBuilderAttributes};
 use reth_optimism_primitives::{OpPrimitives, OpReceipt, OpTransactionSigned};
 use reth_payload_builder_primitives::Events;
-use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{
     ExecutionOutcome, HashedPostStateProvider, ProviderError, StateRootProvider,
@@ -496,7 +495,7 @@ where
                 &mut info,
                 &mut state,
                 &state_provider,
-                &mut best_txs,
+                &mut best_bundles,
                 &block_cancel,
                 &best_payload,
                 &fb_span,
@@ -603,7 +602,7 @@ where
         let best_txs_start_time = Instant::now();
         best_bundles.load_transactions(
             ctx.block_number(),
-            flashblock_index,
+            ctx.flashblock_index(),
         );
 
         let transaction_pool_fetch_time = best_txs_start_time.elapsed();
@@ -620,9 +619,8 @@ where
             state,
             best_bundles,
             target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-        )
-        .wrap_err("failed to execute best transactions")?;
+            target_da_per_batch,
+        )?;
 
         // We got block cancelled, we won't need anything from the block at this point
         // Caution: this assume that block cancel token only cancelled when new FCU is received
@@ -699,11 +697,9 @@ where
                 let flashblock_byte_size = self
                     .ws_pub
                     .publish(&fb_payload)
-                    .wrap_err("failed to publish flashblock via websocket")?;
+                    .map_err(|e| PayloadBuilderError::other(e))?;
 
                 best_bundles.on_new_flashblock(new_payload.block().number, &fb_payload, bundles_processed);
-
-                best_payload.set(new_payload);
 
                 // Record flashblock build duration
                 ctx.metrics

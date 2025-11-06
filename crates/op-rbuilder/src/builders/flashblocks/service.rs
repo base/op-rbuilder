@@ -89,9 +89,9 @@ where
         pool: Pool,
         _: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
-        let signer = self.0.builder_signer;
-        let flashtestations_builder_tx = if self.0.flashtestations_config.flashtestations_enabled {
-            match bootstrap_flashtestations(self.0.flashtestations_config.clone(), ctx).await {
+        let signer = self.config.builder_signer;
+        let flashtestations_builder_tx = if self.config.flashtestations_config.flashtestations_enabled {
+            match bootstrap_flashtestations(self.config.flashtestations_config.clone(), ctx).await {
                 Ok(builder_tx) => Some(builder_tx),
                 Err(e) => {
                     warn!(error = %e, "Failed to bootstrap flashtestations, builder will not include flashtestations txs");
