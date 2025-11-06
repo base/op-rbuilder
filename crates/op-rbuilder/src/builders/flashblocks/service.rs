@@ -90,7 +90,11 @@ where
         _: OpEvmConfig,
     ) -> eyre::Result<PayloadBuilderHandle<<Node::Types as NodeTypes>::Payload>> {
         let signer = self.config.builder_signer;
-        let flashtestations_builder_tx = if self.config.flashtestations_config.flashtestations_enabled {
+        let flashtestations_builder_tx = if self
+            .config
+            .flashtestations_config
+            .flashtestations_enabled
+        {
             match bootstrap_flashtestations(self.config.flashtestations_config.clone(), ctx).await {
                 Ok(builder_tx) => Some(builder_tx),
                 Err(e) => {

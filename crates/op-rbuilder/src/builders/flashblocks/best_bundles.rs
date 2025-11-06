@@ -5,7 +5,6 @@ use rollup_boost::FlashblocksPayloadV1;
 use std::collections::HashSet;
 use tips_bundle_pool::{BundleStore, InMemoryBundlePool, pool::ProcessedBundle};
 use tips_core::{AcceptedBundle, BundleTxs};
-use tracing::debug;
 
 pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
     pool: Pool,
@@ -91,15 +90,6 @@ impl<Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
             if let Some(max) = flashblock_number_max
                 && self.current_flashblock_number > max
             {
-                debug!(
-                    target: "payload_builder",
-                    tx_hash = ?tx.hash(),
-                    sender = ?tx.sender(),
-                    nonce = tx.nonce(),
-                    current_flashblock = self.current_flashblock_number,
-                    max_flashblock = max,
-                    "Bundle flashblock max exceeded"
-                );
                 // self.inner.mark_invalid(tx.sender(), tx.nonce());
                 continue;
             }

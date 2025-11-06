@@ -42,12 +42,15 @@ use reth_optimism_rpc::OpEthApiBuilder;
 use reth_transaction_pool::{AllTransactionsEvents, TransactionPool};
 use rollup_boost::FlashblocksPayloadV1;
 use std::sync::{Arc, LazyLock};
-use tokio::{sync::oneshot, task::JoinHandle};
+use tips_audit::BundleEvent;
+use tips_bundle_pool::InMemoryBundlePool;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use tips_audit::BundleEvent;
-use tips_bundle_pool::InMemoryBundlePool;
 
 /// Represents a type that emulates a local in-process instance of the OP builder node.
 /// This node uses IPC as the communication channel for the RPC server Engine API.

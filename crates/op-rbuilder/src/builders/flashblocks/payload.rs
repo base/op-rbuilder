@@ -597,10 +597,7 @@ where
         }
 
         let best_txs_start_time = Instant::now();
-        best_bundles.load_transactions(
-            ctx.block_number(),
-            ctx.flashblock_index(),
-        );
+        best_bundles.load_transactions(ctx.block_number(), ctx.flashblock_index());
 
         let transaction_pool_fetch_time = best_txs_start_time.elapsed();
         ctx.metrics
