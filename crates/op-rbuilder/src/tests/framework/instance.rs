@@ -177,7 +177,6 @@ impl LocalInstance {
     /// This method prefunds the default accounts with 1 ETH each.
     pub async fn standard() -> eyre::Result<Self> {
         let args = crate::args::Cli::parse_from(["dummy", "node"]);
-        tracing::info!("args: {:?}", &args);
         let Commands::Node(ref node_command) = args.command else {
             unreachable!()
         };
@@ -188,7 +187,6 @@ impl LocalInstance {
     /// This method prefunds the default accounts with 1 ETH each.
     pub async fn flashblocks() -> eyre::Result<Self> {
         let mut args = crate::args::Cli::parse_from(["dummy", "node"]);
-        tracing::info!("args: {:?}", &args);
         let Commands::Node(ref mut node_command) = args.command else {
             unreachable!()
         };
