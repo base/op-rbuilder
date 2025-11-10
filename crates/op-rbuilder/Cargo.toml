@@ -116,6 +116,7 @@ dashmap.workspace = true
 hex = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+concurrent-queue.workspace = true
 
 tower = "0.5"
 time = { version = "0.3.36", features = ["macros", "formatting", "parsing"] }

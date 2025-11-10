@@ -7138,6 +7138,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
+ "concurrent-queue",
  "ctor",
  "dashmap 6.1.0",
  "derive_more",

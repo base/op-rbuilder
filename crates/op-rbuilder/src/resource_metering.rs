@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use alloy_primitives::TxHash;
+use concurrent_queue::{ConcurrentQueue, PopError};
 use dashmap::try_result::TryResult;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
@@ -13,6 +14,7 @@ use crate::metrics::OpRBuilderMetrics;
 struct Data {
     enabled: AtomicBool,
     by_tx_hash: dashmap::DashMap<TxHash, MeterBundleResponse>,
+    lru: ConcurrentQueue<TxHash>,
 }
 
 #[derive(Clone)]
@@ -32,6 +34,20 @@ impl Debug for ResourceMetering {
 
 impl ResourceMetering {
     pub(crate) fn insert(&self, tx: TxHash, metering_info: MeterBundleResponse) {
+        let to_remove = if self.data.lru.is_full() {
+            match self.data.lru.pop() {
+                Ok(tx_hash) => Some(tx_hash),
+                Err(PopError::Empty) => None,
+                Err(PopError::Closed) => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(tx_hash) = to_remove {
+            self.data.by_tx_hash.remove(&tx_hash);
+        }
+
         self.data.by_tx_hash.insert(tx, metering_info);
     }
 
@@ -67,16 +83,17 @@ impl ResourceMetering {
 
 impl Default for ResourceMetering {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(false, 10_000)
     }
 }
 
 impl ResourceMetering {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, buffer_size: usize) -> Self {
         Self {
             data: Arc::new(Data{
                 by_tx_hash: dashmap::DashMap::new(),
                 enabled: AtomicBool::new(enabled),
+                lru: ConcurrentQueue::bounded(buffer_size),
             }),
             metrics: OpRBuilderMetrics::default(),
         }

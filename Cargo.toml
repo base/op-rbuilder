@@ -203,6 +203,7 @@ dashmap = "6.1"
 hex = "0.4"
 futures = "0.3"
 futures-util = "0.3.31"
+concurrent-queue = "2.5.0"
 
 lazy_static = "1.4.0"
 tikv-jemallocator = { version = "0.6" }

@@ -195,6 +195,7 @@ where
             gas_limiter_config: args.gas_limiter.clone(),
             resource_metering: ResourceMetering::new(
                 args.enable_resource_metering,
+                args.resource_metering_buffer_size,
             ),
             specific: S::try_from(args)?,
         })

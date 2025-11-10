@@ -51,6 +51,9 @@ pub struct OpRbuilderArgs {
     /// Whether to enable TIPS Resource Metering
     #[arg(long = "builder.enable-resource-metering", default_value = "false")]
     pub enable_resource_metering: bool,
+    /// Whether to enable TIPS Resource Metering
+    #[arg(long = "builder.resource-metering-buffer-size", default_value = "10_000")]
+    pub resource_metering_buffer_size: usize,
 
     /// Path to builder playgorund to automatically start up the node connected to it
     #[arg(
