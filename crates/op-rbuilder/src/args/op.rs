@@ -48,6 +48,9 @@ pub struct OpRbuilderArgs {
     /// Whether to enable revert protection by default
     #[arg(long = "builder.enable-revert-protection", default_value = "false")]
     pub enable_revert_protection: bool,
+    /// Whether to enable TIPS Resource Metering
+    #[arg(long = "builder.enable-resource-metering", default_value = "false")]
+    pub enable_resource_metering: bool,
 
     /// Path to builder playgorund to automatically start up the node connected to it
     #[arg(

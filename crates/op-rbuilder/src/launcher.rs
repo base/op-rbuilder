@@ -23,6 +23,7 @@ use reth_optimism_node::{
 };
 use reth_transaction_pool::TransactionPool;
 use std::{marker::PhantomData, sync::Arc};
+use crate::resource_metering::{BaseApiExtServer, ResourceMeteringExt};
 
 pub fn launch() -> Result<()> {
     let cli = Cli::parsed();
@@ -109,6 +110,7 @@ where
         let op_node = OpNode::new(rollup_args.clone());
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_copy = reverted_cache.clone();
+        let resource_metering = builder_config.resource_metering.clone();
 
         let mut addons: OpAddOns<
             _,
@@ -163,6 +165,11 @@ where
                     ctx.modules
                         .add_or_replace_configured(revert_protection_ext.into_rpc())?;
                 }
+
+                let resource_metering_ext = ResourceMeteringExt::new(
+                    resource_metering,
+                );
+                ctx.modules.add_or_replace_configured(resource_metering_ext.into_rpc())?;
 
                 Ok(())
             })
