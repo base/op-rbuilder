@@ -144,3 +144,66 @@ impl BaseApiExtServer for ResourceMeteringExt {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{TxHash, B256};
+    use tips_core::MeterBundleResponse;
+
+    fn create_test_metering(gas_used: u64) -> MeterBundleResponse {
+        MeterBundleResponse {
+            bundle_hash: B256::random(),
+            bundle_gas_price: "123".to_string(),
+            coinbase_diff: "123".to_string(),
+            eth_sent_to_coinbase: "123".to_string(),
+            gas_fees: "123".to_string(),
+            results: vec![],
+            state_block_number: 4,
+            state_flashblock_index: None,
+            total_gas_used: gas_used,
+            total_execution_time_us: 533,
+        }
+    }
+
+    #[test]
+    fn test_basic_insert_get_and_enable_disable() {
+        let metering = ResourceMetering::default();
+        let tx_hash = TxHash::random();
+        let meter_data = create_test_metering(21000);
+
+        metering.insert(tx_hash, meter_data);
+        assert!(metering.get(&tx_hash).is_none());
+
+        metering.set_enabled(true);
+        assert_eq!(metering.get(&tx_hash).unwrap().total_gas_used, 21000);
+
+        metering.insert(tx_hash, create_test_metering(50000));
+        assert_eq!(metering.get(&tx_hash).unwrap().total_gas_used, 50000);
+
+        metering.set_enabled(false);
+        assert!(metering.get(&tx_hash).is_none());
+
+        metering.set_enabled(true);
+        assert!(metering.get(&TxHash::random()).is_none());
+    }
+
+    #[test]
+    fn test_clear() {
+        let metering = ResourceMetering::new(true, 100);
+
+        let tx1 = TxHash::random();
+        let tx2 = TxHash::random();
+
+        metering.insert(tx1, create_test_metering(1000));
+        metering.insert(tx2, create_test_metering(2000));
+
+        assert!(metering.get(&tx1).is_some());
+        assert!(metering.get(&tx2).is_some());
+
+        metering.clear();
+
+        assert!(metering.get(&tx1).is_none());
+        assert!(metering.get(&tx2).is_none());
+    }
+}
