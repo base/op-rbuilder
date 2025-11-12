@@ -3,6 +3,7 @@ run-playground:
   cargo run -p op-rbuilder --bin op-rbuilder -- node \
       --chain $HOME/.playground/devnet/l2-genesis.json \
       --flashblocks.enabled \
+      --builder.enable-resource-metering \
       --datadir ~/.playground/devnet/op-rbuilder \
       -vv \
       --http --http.port 2222 \

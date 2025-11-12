@@ -46,6 +46,8 @@ unreachable_pub = "deny"
 unused_async = "warn"
 
 [workspace.dependencies]
+tips-core = { git = "https://github.com/base/tips", rev = "a21ee492dede17f31eea108c12c669a8190f31aa", default-features = false }
+
 reth = { git = "https://github.com/paradigmxyz/reth", version = "1.9.3" }
 reth-chain-state = { git = "https://github.com/paradigmxyz/reth", version = "1.9.3" }
 reth-cli = { git = "https://github.com/paradigmxyz/reth", version = "1.9.3" }
