@@ -1,5 +1,6 @@
 use crate::traits::BundleBounds;
 use alloy_primitives::TxHash;
+use alloy_primitives::map::HashMap;
 use reth_transaction_pool::TransactionPool;
 use rollup_boost::FlashblocksPayloadV1;
 use std::collections::HashSet;
@@ -16,6 +17,7 @@ pub(super) struct BestFlashblocksBundles<Pool: TransactionPool> {
 
     // Mut stuff
     bundles: Vec<AcceptedBundle>,
+    backrun_bundles: HashMap<TxHash, AcceptedBundle>,
     curr_bundles_idx: usize,
     current_block_num: u64,
 }
@@ -29,6 +31,7 @@ impl<Pool: TransactionPool> BestFlashblocksBundles<Pool> {
             current_block_num: 0,
             commited_transactions: Default::default(),
             bundles: vec![],
+            backrun_bundles: Default::default(),
             curr_bundles_idx: 0,
         }
     }
@@ -44,6 +47,7 @@ impl<Pool: TransactionPool> BestFlashblocksBundles<Pool> {
         self.current_block_num = current_block_num;
 
         self.bundles = self.bundle_pool.get_bundles();
+        self.backrun_bundles = self.bundle_pool.get_backrun_bundles();
         self.curr_bundles_idx = 0;
     }
 
@@ -96,6 +100,10 @@ impl<Pool: TransactionPool> BundleBounds for BestFlashblocksBundles<Pool> {
 
             return Some(bundle);
         }
+    }
+
+    fn get_backrun_bundle(&mut self, tx_hash: &TxHash) -> Option<&AcceptedBundle> {
+        self.backrun_bundles.get(tx_hash)
     }
 
     // TODO
