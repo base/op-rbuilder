@@ -41,7 +41,7 @@ use std::{sync::Arc, time::Instant};
 use tips_bundle_pool::pool::{Action, ProcessedBundle};
 use tips_core::{BundleExtensions, BundleTxs};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     gas_limiter::AddressGasLimiter,
@@ -445,6 +445,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 // append sender and transaction to the respective lists
                 info.executed_senders.push(txn.signer());
                 info.executed_transactions.push(txn.clone().into_inner());
+
+                if let Some(backrun_bundle) = best_bundles.get_backrun_bundle(&txn.tx_hash()) {
+                    warn!(target: "payload_builder", tx_hash = ?txn.tx_hash(), "Executing backrun bundle");
+                    // TODO: execute backrun bundle
+                }
             }
 
             // TODO: confirm this is safe to do

@@ -1,4 +1,5 @@
 use alloy_consensus::Header;
+use alloy_primitives::TxHash;
 use reth_node_api::{FullNodeComponents, FullNodeTypes, NodeTypes};
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_node::OpEngineTypes;
@@ -80,6 +81,7 @@ impl<T> ClientBounds for T where
 
 pub trait BundleBounds {
     fn next(&mut self, ctx: ()) -> Option<&AcceptedBundle>;
+    fn get_backrun_bundle(&mut self, tx_hash: &TxHash) -> Option<&AcceptedBundle>;
 
     fn mark_invalid(&mut self, bundle: &AcceptedBundle);
 }
