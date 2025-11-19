@@ -148,16 +148,16 @@ impl BaseApiExtServer for ResourceMeteringExt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{TxHash, B256};
+    use alloy_primitives::{TxHash, B256, U256};
     use tips_core::MeterBundleResponse;
 
     fn create_test_metering(gas_used: u64) -> MeterBundleResponse {
         MeterBundleResponse {
             bundle_hash: B256::random(),
-            bundle_gas_price: "123".to_string(),
-            coinbase_diff: "123".to_string(),
-            eth_sent_to_coinbase: "123".to_string(),
-            gas_fees: "123".to_string(),
+            bundle_gas_price: U256::from(123),
+            coinbase_diff: U256::from(123),
+            eth_sent_to_coinbase: U256::from(123),
+            gas_fees: U256::from(123),
             results: vec![],
             state_block_number: 4,
             state_flashblock_index: None,

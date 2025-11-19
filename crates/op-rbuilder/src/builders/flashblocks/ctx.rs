@@ -17,6 +17,8 @@ use reth_optimism_primitives::OpTransactionSigned;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::resource_metering::ResourceMetering;
+
 #[derive(Debug, Clone)]
 pub(super) struct OpPayloadSyncerCtx {
     /// The type that knows how to perform system calls and configure the evm.
@@ -80,6 +82,7 @@ impl OpPayloadSyncerCtx {
             extra_ctx: (),
             max_gas_per_txn: self.max_gas_per_txn,
             address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
+            resource_metering: ResourceMetering::default(),
         }
     }
 }
