@@ -31,6 +31,9 @@ on:
         required: false
         type: choice
 
+permissions:
+  contents: read
+
 jobs:
   extract-version:
     name: Extract version
@@ -38,6 +41,11 @@ jobs:
     outputs:
       VERSION: ${{ steps.extract-version.outputs.VERSION }}
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: Extract version
         id: extract-version
         run: |
@@ -83,6 +91,11 @@ jobs:
           - ${{ github.event.inputs.features || '' }}
 
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: Install dependencies
         run: |
           apt-get update
@@ -96,7 +109,7 @@ jobs:
             protobuf-compiler
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-      - uses: actions/checkout@v4 # must install git before checkout and set safe.directory after checkout because of container
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Build op-rbuilder binary
         run: |
@@ -111,7 +124,7 @@ jobs:
           CXXFLAGS="-D__TIME__=\"\" -D__DATE__=\"\"" \
           cargo build --release --features=${{ matrix.features }} --locked --target ${{ matrix.configs.target }} --package op-rbuilder
       - name: Upload op-rbuilder artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: op-rbuilder-${{ env.VERSION }}-${{ matrix.configs.target }}${{ matrix.features && '-' }}${{ matrix.features }}
           path: target/${{ matrix.configs.target }}/release/op-rbuilder
@@ -126,11 +139,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Download artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           merge-multiple: false
           path: artifacts
@@ -150,7 +168,7 @@ jobs:
           cat sha256sums.txt
 
       - name: Create release draft
-        uses: softprops/action-gh-release@v2.0.5
+        uses: softprops/action-gh-release@69320dbe05506a9a39fc8ae11030b214ec2d1f87 # v2.0.5
         id: create-release-draft
         with:
           draft: true
@@ -183,8 +201,13 @@ jobs:
           - platform: linux/arm64
             runner: warp-ubuntu-latest-arm64-16x
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: set env
         run: |
@@ -192,13 +215,13 @@ jobs:
           echo "PLATFORM=${platform#*/}" >> $GITHUB_ENV
 
       - name: docker qemu
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: docker buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: docker metadata
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
@@ -211,14 +234,14 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(env.VERSION, '-') }},suffix=-${{ env.PLATFORM }}
 
       - name: docker login
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: docker build and push op-rbuilder
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         id: build
         with:
           cache-from: type=gha
@@ -240,7 +263,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digests-${{ env.PLATFORM }}
           path: /tmp/digests/*
@@ -256,18 +279,23 @@ jobs:
       - extract-version
       - publish-container-image
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: setup docker buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: login to ghcr
-        uses: docker/login-action@v3
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -275,7 +303,7 @@ jobs:
 
       - name: generate container metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
         with:
           images: ghcr.io/${{ github.repository }}
           labels: org.opencontainers.image.source=${{ github.repositoryUrl }}
