@@ -24,6 +24,9 @@ mod ordering;
 mod revert;
 
 #[cfg(test)]
+mod resource_metering;
+
+#[cfg(test)]
 mod smoke;
 
 #[cfg(test)]
