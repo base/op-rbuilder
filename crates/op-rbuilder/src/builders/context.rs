@@ -42,7 +42,9 @@ use tracing::{debug, info, trace};
 use crate::{
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
-    primitives::reth::{ExecutionInfo, TxnExecutionResult},
+    primitives::reth::{
+        BlockLimits, ExecutionInfo, LimitContext, TxLimits, TxUsage, TxnExecutionResult,
+    },
     resource_metering::ResourceMetering,
     traits::PayloadTxsBounds,
     tx::MaybeRevertingTransaction,
@@ -475,18 +477,25 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 }
             }
 
+            let resource_limits = LimitContext {
+                block: BlockLimits {
+                    gas: block_gas_limit,
+                    data: block_da_limit,
+                    da_footprint: block_da_footprint_limit,
+                    execution_time_us: block_execution_time_limit_us,
+                },
+                tx: TxLimits { data: tx_da_limit },
+                da_footprint_gas_scalar: info.da_footprint_scalar,
+            };
+
+            let usage = TxUsage {
+                data_size: tx_da_size,
+                gas_limit: tx.gas_limit(),
+                execution_time_us: tx_execution_time_us,
+            };
+
             // ensure we still have capacity for this transaction
-            if let Err(result) = info.is_tx_over_limits(
-                tx_da_size,
-                block_gas_limit,
-                tx_da_limit,
-                block_da_limit,
-                tx.gas_limit(),
-                info.da_footprint_scalar,
-                block_da_footprint_limit,
-                tx_execution_time_us,
-                block_execution_time_limit_us,
-            ) {
+            if let Err(result) = info.is_tx_over_limits(&usage, &resource_limits) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
                 // the iterator before we can continue
