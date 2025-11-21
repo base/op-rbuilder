@@ -795,7 +795,8 @@ where
                     .flashblock_num_tx_histogram
                     .record(info.executed_transactions.len() as f64);
 
-                // Update bundle_state for next iteration
+                // Any unused DA carries over to the next batch. Add the
+                // per-flashblock limit to the last target for the accumulator.
                 if let Some(da_limit) = ctx.extra_ctx.da_per_batch {
                     if let Some(da) = target_da_for_batch.as_mut() {
                         *da += da_limit;
@@ -806,12 +807,12 @@ where
                     }
                 }
 
-                // Any unused gas carries over to the next batch. The total
-                // gas used for the block after the next flashblock can be
-                // up to the total gas for allocated for each batch so far.
+                // Any unused gas carries over to the next batch. Add the
+                // per-flashblock limit to the last target for the accumulator.
                 let target_gas_for_batch =
                     ctx.extra_ctx.target_gas_for_batch + ctx.extra_ctx.gas_per_batch;
 
+                // Any unused DA footprint carries over to the next batch.
                 if let (Some(footprint), Some(da_footprint_limit)) = (
                     target_da_footprint_for_batch.as_mut(),
                     ctx.extra_ctx.da_footprint_per_batch,
@@ -820,9 +821,8 @@ where
                 }
 
                 // Any unused execution time *does not* carry over to the next
-                // batch. The total execution time for the block after the next
-                // flashblock can only be up to the execution time *used* so far
-                // plus its own limit.
+                // batch. Add the per-flashblock limit to the current value of
+                // the accumulator itself to discard the unused execution time.
                 let target_execution_time_per_batch_us =
                     info.cumulative_execution_time_us + ctx.extra_ctx.execution_time_per_batch_us;
 
