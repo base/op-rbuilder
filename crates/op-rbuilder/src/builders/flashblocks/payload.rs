@@ -85,6 +85,8 @@ pub struct FlashblocksExtraCtx {
     target_gas_for_batch: u64,
     /// Total DA bytes left for the current flashblock
     target_da_for_batch: Option<u64>,
+    /// Total execution time (us) left for the current flashblock
+    target_execution_time_per_batch_us: u128,
     /// Gas limit per flashblock
     gas_per_batch: u64,
     /// DA bytes limit per flashblock
@@ -96,11 +98,17 @@ pub struct FlashblocksExtraCtx {
 }
 
 impl FlashblocksExtraCtx {
-    fn next(self, target_gas_for_batch: u64, target_da_for_batch: Option<u64>) -> Self {
+    fn next(
+        self,
+        target_gas_for_batch: u64,
+        target_da_for_batch: Option<u64>,
+        target_execution_time_per_batch_us: u128,
+    ) -> Self {
         Self {
             flashblock_index: self.flashblock_index + 1,
             target_gas_for_batch,
             target_da_for_batch,
+            target_execution_time_per_batch_us,
             ..self
         }
     }
@@ -465,12 +473,12 @@ where
         if let Some(da_limit) = target_da_for_batch.as_mut() {
             *da_limit = da_limit.saturating_sub(builder_tx_da_size);
         }
-        // TODO: Account for builder tx execution time once we track it
         let extra_ctx = FlashblocksExtraCtx {
             flashblock_index: 1,
             target_flashblock_count: flashblocks_per_block,
             target_gas_for_batch: target_gas_for_batch.saturating_sub(builder_tx_gas),
             target_da_for_batch,
+            target_execution_time_per_batch_us: execution_time_per_batch_us,
             gas_per_batch,
             da_per_batch,
             execution_time_per_batch_us,
@@ -681,7 +689,7 @@ where
             best_txs,
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
-            ctx.extra_ctx.execution_time_per_batch_us,
+            ctx.extra_ctx.target_execution_time_per_batch_us,
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
@@ -788,12 +796,23 @@ where
                     }
                 }
 
+                // Any unused gas carries over to the next batch. The total
+                // gas used for the block after the next flashblock can be
+                // up to the total gas for allocated for each batch so far.
                 let target_gas_for_batch =
                     ctx.extra_ctx.target_gas_for_batch + ctx.extra_ctx.gas_per_batch;
-                let next_extra_ctx = ctx
-                    .extra_ctx
-                    .clone()
-                    .next(target_gas_for_batch, target_da_for_batch);
+                // Any unused execution time *does not* carry over to the next
+                // batch. The total execution time for the block after the next
+                // flashblock can only be up to the execution time *used* so far
+                // plus its own limit.
+                let target_execution_time_per_batch_us =
+                    info.cumulative_execution_time_us + ctx.extra_ctx.execution_time_per_batch_us;
+
+                let next_extra_ctx = ctx.extra_ctx.clone().next(
+                    target_gas_for_batch,
+                    target_da_for_batch,
+                    target_execution_time_per_batch_us,
+                );
 
                 info!(
                     target: "payload_builder",
