@@ -32,6 +32,8 @@ pub(super) struct OpPayloadSyncerCtx {
     metrics: Arc<OpRBuilderMetrics>,
     /// Resource metering tracking
     resource_metering: ResourceMetering,
+    /// Block execution time limit in microseconds
+    block_execution_time_limit_us: u128,
 }
 
 impl OpPayloadSyncerCtx {
@@ -52,6 +54,7 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: builder_config.max_gas_per_txn,
             metrics,
             resource_metering: builder_config.resource_metering,
+            block_execution_time_limit_us: builder_config.block_time.as_micros(),
         })
     }
 
@@ -85,6 +88,7 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: self.max_gas_per_txn,
             address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
             resource_metering: self.resource_metering.clone(),
+            block_execution_time_limit_us: self.block_execution_time_limit_us,
         }
     }
 }

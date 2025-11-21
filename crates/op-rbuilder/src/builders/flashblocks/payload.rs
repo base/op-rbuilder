@@ -92,6 +92,8 @@ pub struct FlashblocksExtraCtx {
     da_per_batch: Option<u64>,
     /// DA footprint limit per flashblock
     da_footprint_per_batch: Option<u64>,
+    /// Execution time (us) limit per flashblock
+    execution_time_per_batch_us: u128,
     /// Whether to disable state root calculation for each flashblock
     disable_state_root: bool,
 }
@@ -283,6 +285,7 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            block_execution_time_limit_us: self.config.block_time.as_micros(),
         })
     }
 
@@ -442,6 +445,8 @@ where
             .da_config
             .max_da_block_size()
             .map(|da_limit| da_limit / flashblocks_per_block);
+        // Use flashblock interval as the execution time limit per flashblock (in microseconds)
+        let execution_time_per_batch_us = self.config.specific.interval.as_micros();
         // Check that builder tx won't affect fb limit too much
         if let Some(da_limit) = da_per_batch {
             // We error if we can't insert any tx aside from builder tx in flashblock
@@ -463,6 +468,7 @@ where
             gas_per_batch,
             da_per_batch,
             da_footprint_per_batch,
+            execution_time_per_batch_us,
             disable_state_root,
             target_da_footprint_for_batch: da_footprint_per_batch,
         };
@@ -688,6 +694,7 @@ where
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
             target_da_footprint_for_batch,
+            ctx.extra_ctx.execution_time_per_batch_us,
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions

@@ -12,6 +12,10 @@ pub enum TxnExecutionResult {
     BlockDALimitExceeded(u64, u64, u64),
     #[display("TransactionGasLimitExceeded: total_gas_used={_0} tx_gas_limit={_1}")]
     TransactionGasLimitExceeded(u64, u64, u64),
+    #[display(
+        "BlockExecutionTimeLimitExceeded: total_time_us={_0} tx_time_us={_1} block_time_limit_us={_2}"
+    )]
+    BlockExecutionTimeLimitExceeded(u128, u128, u128),
     SequencerTransaction,
     NonceTooLow,
     InteropFailed,
@@ -42,6 +46,8 @@ pub struct ExecutionInfo<Extra: Debug + Default = ()> {
     pub extra: Extra,
     /// DA Footprint Scalar for Jovian
     pub da_footprint_scalar: Option<u16>,
+    /// Cumulative execution time in microseconds
+    pub cumulative_execution_time_us: u128,
 }
 
 impl<T: Debug + Default> ExecutionInfo<T> {
@@ -56,6 +62,7 @@ impl<T: Debug + Default> ExecutionInfo<T> {
             total_fees: U256::ZERO,
             extra: Default::default(),
             da_footprint_scalar: None,
+            cumulative_execution_time_us: 0,
         }
     }
 
@@ -65,6 +72,8 @@ impl<T: Debug + Default> ExecutionInfo<T> {
     ///   per tx.
     /// - block DA limit: if configured, ensures the transaction's DA size does not exceed the
     ///   maximum allowed DA limit per block.
+    /// - block execution time limit: if configured, ensures the transaction's execution time does
+    ///   not exceed the maximum allowed execution time per block.
     #[allow(clippy::too_many_arguments)]
     pub fn is_tx_over_limits(
         &self,
@@ -75,6 +84,8 @@ impl<T: Debug + Default> ExecutionInfo<T> {
         tx_gas_limit: u64,
         da_footprint_gas_scalar: Option<u16>,
         block_da_footprint_limit: Option<u64>,
+        tx_execution_time_us: u128,
+        block_execution_time_limit_us: u128,
     ) -> Result<(), TxnExecutionResult> {
         if tx_data_limit.is_some_and(|da_limit| tx_da_size > da_limit) {
             return Err(TxnExecutionResult::TransactionDALimitExceeded);
@@ -108,6 +119,19 @@ impl<T: Debug + Default> ExecutionInfo<T> {
                 block_gas_limit,
             ));
         }
+
+        // Check block execution time limit
+        let total_execution_time_us = self
+            .cumulative_execution_time_us
+            .saturating_add(tx_execution_time_us);
+        if total_execution_time_us > block_execution_time_limit_us {
+            return Err(TxnExecutionResult::BlockExecutionTimeLimitExceeded(
+                self.cumulative_execution_time_us,
+                tx_execution_time_us,
+                block_execution_time_limit_us,
+            ));
+        }
+
         Ok(())
     }
 }

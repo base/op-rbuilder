@@ -80,6 +80,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
+    /// Block execution time limit in microseconds
+    pub block_execution_time_limit_us: u128,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -389,6 +391,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
         block_da_footprint_limit: Option<u64>,
+        block_execution_time_limit_us: u128,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -445,7 +448,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
             num_txs_considered += 1;
 
-            let _resource_usage = self.resource_metering.get(&tx_hash);
+            let resource_usage = self.resource_metering.get(&tx_hash);
+            let tx_execution_time_us = resource_usage
+                .as_ref()
+                .map(|r| r.total_execution_time_us)
+                .unwrap_or(0);
 
             // TODO: ideally we should get this from the txpool stream
             if let Some(conditional) = conditional
@@ -477,6 +484,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 tx.gas_limit(),
                 info.da_footprint_scalar,
                 block_da_footprint_limit,
+                tx_execution_time_us,
+                block_execution_time_limit_us,
             ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
@@ -577,6 +586,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.cumulative_gas_used += gas_used;
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
+            // record tx execution time
+            info.cumulative_execution_time_us += tx_execution_time_us;
 
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {
