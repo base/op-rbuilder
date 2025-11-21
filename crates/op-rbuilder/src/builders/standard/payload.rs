@@ -251,6 +251,7 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            block_execution_time_limit_us: self.config.block_time.as_micros(),
         };
 
         let builder = OpBuilder::new(best);
@@ -406,6 +407,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
                     &mut best_txs,
                     block_gas_limit,
                     block_da_limit,
+                    ctx.block_execution_time_limit_us,
                 )?
                 .is_some()
             {
