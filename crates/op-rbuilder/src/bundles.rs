@@ -9,17 +9,11 @@ use op_alloy_consensus::OpTxEnvelope;
 use std::{fmt::Debug, sync::Arc};
 use tips_core::Bundle;
 use tips_core::types::ParsedBundle;
-use tracing::{debug, warn};
-
-// ============================================================================
-// BackrunBundleStore - stores backrun transactions keyed by target tx hash
-// ============================================================================
+use tracing::{debug, info, warn};
 
 struct BackrunData {
-    /// Map: target_tx_hash -> Vec<Vec<Recovered<OpTxEnvelope>>>
-    /// Key is txs[0].hash(), value is list of backrun tx lists (txs[1..])
+    /// Key is the hash of the target tx, value is list of backrun raw txs
     by_target_tx: dashmap::DashMap<TxHash, Vec<Vec<Recovered<OpTxEnvelope>>>>,
-    /// LRU queue for eviction (stores target tx hashes)
     lru: ConcurrentQueue<TxHash>,
 }
 
@@ -46,20 +40,13 @@ impl BackrunBundleStore {
         }
     }
 
-    /// Insert a backrun bundle. Extracts target tx (txs[0]) and stores backrun txs (txs[1..])
     pub fn insert(&self, bundle: ParsedBundle) -> Result<(), String> {
-        if bundle.txs.is_empty() {
-            return Err("Bundle has no transactions".to_string());
-        }
-
         if bundle.txs.len() < 2 {
             return Err("Bundle must have at least 2 transactions (target + backrun)".to_string());
         }
 
-        // Target tx is txs[0]
+        // Target tx is txs[0], backrun txs are txs[1..]
         let target_tx_hash = bundle.txs[0].tx_hash();
-
-        // Backrun txs are txs[1..]
         let backrun_txs: Vec<Recovered<OpTxEnvelope>> = bundle.txs[1..].to_vec();
 
         // Handle LRU eviction
@@ -84,7 +71,7 @@ impl BackrunBundleStore {
             .or_insert_with(Vec::new)
             .push(backrun_txs.clone());
 
-        warn!(
+        info!(
             target: "backrun_bundles",
             target_tx = ?target_tx_hash,
             backrun_tx_count = backrun_txs.len(),
@@ -114,20 +101,9 @@ impl BackrunBundleStore {
         }
     }
 
-    /// Clear all backrun bundles
-    pub fn clear(&self) {
-        self.data.by_target_tx.clear();
-        debug!(target: "backrun_bundles", "Cleared all backrun bundles");
-    }
-
     /// Get count of target transactions with backrun bundles
     pub fn len(&self) -> usize {
         self.data.by_target_tx.len()
-    }
-
-    /// Check if store is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.by_target_tx.is_empty()
     }
 }
 
@@ -161,7 +137,6 @@ impl BundlesApiExt {
 #[async_trait]
 impl BaseBundlesApiExtServer for BundlesApiExt {
     async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()> {
-        warn!(target: "backrun_bundles", "Received backrun bundle");
         // Parse and validate bundle (convert Bundle -> ParsedBundle)
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
@@ -171,8 +146,6 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
                 None::<()>,
             )
         })?;
-
-        warn!(target: "backrun_bundles", "Parsed bundle");
 
         // Store in BackrunBundleStore keyed by target_tx_hash (txs[0])
         self.bundle_store.insert(parsed_bundle).map_err(|e| {
@@ -184,8 +157,6 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
             )
         })?;
 
-        warn!(target: "backrun_bundles", "Stored bundle");
-
         Ok(())
     }
 }
@@ -193,18 +164,114 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::SignableTransaction;
+    use alloy_primitives::Bytes;
+    use alloy_primitives::{Address, TxHash, U256};
+    use alloy_provider::network::TxSignerSync;
+    use alloy_provider::network::eip2718::Encodable2718;
+    use alloy_signer_local::PrivateKeySigner;
+    use op_alloy_consensus::OpTxEnvelope;
+    use op_alloy_rpc_types::OpTransactionRequest;
 
-    #[test]
-    fn test_backrun_bundle_store_basic() {
-        let store = BackrunBundleStore::new(100);
-        assert!(store.is_empty());
-        assert_eq!(store.len(), 0);
+    fn create_transaction(from: PrivateKeySigner, nonce: u64, to: Address) -> OpTxEnvelope {
+        let mut txn = OpTransactionRequest::default()
+            .value(U256::from(10_000))
+            .gas_limit(21_000)
+            .max_fee_per_gas(200)
+            .max_priority_fee_per_gas(100)
+            .from(from.address())
+            .to(to)
+            .nonce(nonce)
+            .build_typed_tx()
+            .unwrap();
+
+        let sig = from.sign_transaction_sync(&mut txn).unwrap();
+        OpTxEnvelope::Eip1559(txn.eip1559().cloned().unwrap().into_signed(sig).clone())
+    }
+
+    fn create_test_parsed_bundle(txs: Vec<Bytes>) -> ParsedBundle {
+        tips_core::Bundle {
+            txs,
+            block_number: 1,
+            ..Default::default()
+        }
+        .try_into()
+        .unwrap()
     }
 
     #[test]
-    fn test_backrun_bundle_store_clear() {
+    fn test_backrun_bundle_store() {
+        let alice = PrivateKeySigner::random();
+        let bob = PrivateKeySigner::random();
+
+        // Create test transactions
+        let target_tx = create_transaction(alice.clone(), 0, bob.address());
+        let backrun_tx1 = create_transaction(alice.clone(), 1, bob.address());
+        let backrun_tx2 = create_transaction(alice.clone(), 2, bob.address());
+
+        let target_tx_hash = target_tx.tx_hash();
+
         let store = BackrunBundleStore::new(100);
-        store.clear();
-        assert!(store.is_empty());
+
+        // Test insert fails with only 1 tx (need target + at least 1 backrun)
+        let single_tx_bundle = create_test_parsed_bundle(vec![target_tx.encoded_2718().into()]);
+        assert!(store.insert(single_tx_bundle).is_err());
+        assert_eq!(store.len(), 0);
+
+        // Test insert succeeds with 2+ txs
+        let valid_bundle = create_test_parsed_bundle(vec![
+            target_tx.encoded_2718().into(),
+            backrun_tx1.encoded_2718().into(),
+        ]);
+        assert!(store.insert(valid_bundle).is_ok());
+        assert_eq!(store.len(), 1);
+
+        // Test get returns the backrun txs (not the target)
+        let retrieved = store.get(&target_tx_hash).unwrap();
+        assert_eq!(retrieved.len(), 1); // 1 bundle
+        assert_eq!(retrieved[0].len(), 1); // 1 backrun tx in that bundle
+        assert_eq!(retrieved[0][0].tx_hash(), backrun_tx1.tx_hash());
+
+        // Test multiple backrun bundles for same target
+        let second_bundle = create_test_parsed_bundle(vec![
+            target_tx.encoded_2718().into(),
+            backrun_tx2.encoded_2718().into(),
+        ]);
+        assert!(store.insert(second_bundle).is_ok());
+        assert_eq!(store.len(), 1); // Still 1 target, but 2 backrun bundles
+
+        let retrieved = store.get(&target_tx_hash).unwrap();
+        assert_eq!(retrieved.len(), 2); // Now 2 bundles for same target
+
+        // Test remove
+        store.remove(&target_tx_hash);
+        assert_eq!(store.len(), 0);
+        assert!(store.get(&target_tx_hash).is_none());
+
+        // Test remove on non-existent key doesn't panic
+        store.remove(&TxHash::ZERO);
+    }
+
+    #[test]
+    fn test_backrun_bundle_store_lru_eviction() {
+        let alice = PrivateKeySigner::random();
+        let bob = PrivateKeySigner::random();
+
+        // Small buffer to test eviction
+        let store = BackrunBundleStore::new(2);
+
+        // Insert 3 bundles, first should be evicted
+        for nonce in 0..3u64 {
+            let target = create_transaction(alice.clone(), nonce * 2, bob.address());
+            let backrun = create_transaction(alice.clone(), nonce * 2 + 1, bob.address());
+            let bundle = create_test_parsed_bundle(vec![
+                target.encoded_2718().into(),
+                backrun.encoded_2718().into(),
+            ]);
+            let _ = store.insert(bundle);
+        }
+
+        // Only 2 should remain due to LRU eviction
+        assert_eq!(store.len(), 2);
     }
 }

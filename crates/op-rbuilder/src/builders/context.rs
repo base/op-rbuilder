@@ -605,12 +605,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
 
-            warn!(target: "backrun_bundles", tx_hash = ?tx_hash, "Executing backrun bundles for transaction");
-
             // Execute backrun bundles for this transaction if it succeeded
             if is_success {
                 if let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
-                    warn!(
+                    info!(
                         target: "backrun_bundles",
                         target_tx = ?tx_hash,
                         bundle_count = backrun_bundles.len(),
