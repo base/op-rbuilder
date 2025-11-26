@@ -7,9 +7,10 @@ use jsonrpsee::{
 };
 use op_alloy_consensus::OpTxEnvelope;
 use std::{fmt::Debug, sync::Arc};
-use tips_core::Bundle;
-use tips_core::types::ParsedBundle;
+use tips_core::{Bundle, types::ParsedBundle};
 use tracing::{debug, info, warn};
+
+use crate::metrics::OpRBuilderMetrics;
 
 struct BackrunData {
     /// Key is the hash of the target tx, value is list of backrun raw txs
@@ -20,6 +21,7 @@ struct BackrunData {
 #[derive(Clone)]
 pub struct BackrunBundleStore {
     data: Arc<BackrunData>,
+    metrics: OpRBuilderMetrics,
 }
 
 impl Debug for BackrunBundleStore {
@@ -37,6 +39,7 @@ impl BackrunBundleStore {
                 by_target_tx: dashmap::DashMap::new(),
                 lru: ConcurrentQueue::bounded(buffer_size),
             }),
+            metrics: OpRBuilderMetrics::default(),
         }
     }
 
@@ -78,6 +81,10 @@ impl BackrunBundleStore {
             "Stored backrun bundle"
         );
 
+        self.metrics
+            .backrun_bundles_in_store
+            .set(self.data.by_target_tx.len() as f64);
+
         Ok(())
     }
 
@@ -98,6 +105,10 @@ impl BackrunBundleStore {
                 bundle_count = bundles.len(),
                 "Removed backrun bundles"
             );
+
+            self.metrics
+                .backrun_bundles_in_store
+                .set(self.data.by_target_tx.len() as f64);
         }
     }
 
@@ -126,17 +137,23 @@ pub trait BaseBundlesApiExt {
 
 pub(crate) struct BundlesApiExt {
     bundle_store: BackrunBundleStore,
+    metrics: OpRBuilderMetrics,
 }
 
 impl BundlesApiExt {
     pub(crate) fn new(bundle_store: BackrunBundleStore) -> Self {
-        Self { bundle_store }
+        Self {
+            bundle_store,
+            metrics: OpRBuilderMetrics::default(),
+        }
     }
 }
 
 #[async_trait]
 impl BaseBundlesApiExtServer for BundlesApiExt {
     async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()> {
+        self.metrics.backrun_bundles_received_total.increment(1);
+
         // Parse and validate bundle (convert Bundle -> ParsedBundle)
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
@@ -165,10 +182,8 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
 mod tests {
     use super::*;
     use alloy_consensus::SignableTransaction;
-    use alloy_primitives::Bytes;
-    use alloy_primitives::{Address, TxHash, U256};
-    use alloy_provider::network::TxSignerSync;
-    use alloy_provider::network::eip2718::Encodable2718;
+    use alloy_primitives::{Address, Bytes, TxHash, U256};
+    use alloy_provider::network::{TxSignerSync, eip2718::Encodable2718};
     use alloy_signer_local::PrivateKeySigner;
     use op_alloy_consensus::OpTxEnvelope;
     use op_alloy_rpc_types::OpTransactionRequest;

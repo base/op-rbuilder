@@ -615,6 +615,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                         "Found backrun bundles for transaction"
                     );
 
+                    self.metrics.backrun_target_txs_found_total.increment(1);
+
                     // TODO: Execute backrun bundles
                 }
             }
