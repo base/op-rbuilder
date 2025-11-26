@@ -11,6 +11,7 @@ pub mod traits;
 pub mod tx;
 pub mod tx_signer;
 
+mod bundles;
 #[cfg(test)]
 pub mod mock_tx;
 mod resource_metering;
