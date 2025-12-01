@@ -33,24 +33,27 @@ pub enum BaseLimitExceeded {
 }
 
 impl BaseExecutionState {
-    /// Check if adding this tx would exceed Base-specific limits.
+    /// Check if adding a tx would exceed Base-specific limits.
     /// Call this AFTER the upstream is_tx_over_limits().
-    pub fn is_tx_over_base_limits(
+    /// Returns the usage for later recording via `record_tx`.
+    pub fn check_tx(
         &self,
-        usage: &BaseTxUsage,
-        limits: &BaseBlockLimits,
-    ) -> Result<(), BaseLimitExceeded> {
+        metering: &ResourceMetering,
+        tx_hash: &TxHash,
+        execution_time_limit_us: u128,
+    ) -> Result<BaseTxUsage, BaseLimitExceeded> {
+        let usage = BaseTxUsage::from_metering(metering, tx_hash);
         let total = self
             .cumulative_execution_time_us
             .saturating_add(usage.execution_time_us);
-        if total > limits.execution_time_us {
+        if total > execution_time_limit_us {
             return Err(BaseLimitExceeded::ExecutionTime {
                 cumulative_us: self.cumulative_execution_time_us,
                 tx_us: usage.execution_time_us,
-                limit_us: limits.execution_time_us,
+                limit_us: execution_time_limit_us,
             });
         }
-        Ok(())
+        Ok(usage)
     }
 
     /// Record that a transaction was included.

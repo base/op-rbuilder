@@ -1,5 +1,6 @@
 use super::{config::FlashblocksConfig, wspub::WebSocketPublisher};
 use crate::{
+    base::{context::BaseBuilderCtx, flashblocks::BaseFlashblocksCtx},
     builders::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
@@ -86,18 +87,16 @@ pub struct FlashblocksExtraCtx {
     target_da_for_batch: Option<u64>,
     /// Total DA footprint left for the current flashblock
     target_da_footprint_for_batch: Option<u64>,
-    /// Total execution time (us) left for the current flashblock
-    target_execution_time_per_batch_us: u128,
     /// Gas limit per flashblock
     gas_per_batch: u64,
     /// DA bytes limit per flashblock
     da_per_batch: Option<u64>,
     /// DA footprint limit per flashblock
     da_footprint_per_batch: Option<u64>,
-    /// Execution time (us) limit per flashblock
-    execution_time_per_batch_us: u128,
     /// Whether to disable state root calculation for each flashblock
     disable_state_root: bool,
+    /// Base-specific flashblocks context
+    base_ctx: BaseFlashblocksCtx,
 }
 
 impl FlashblocksExtraCtx {
@@ -106,14 +105,14 @@ impl FlashblocksExtraCtx {
         target_gas_for_batch: u64,
         target_da_for_batch: Option<u64>,
         target_da_footprint_for_batch: Option<u64>,
-        target_execution_time_per_batch_us: u128,
+        base_ctx: BaseFlashblocksCtx,
     ) -> Self {
         Self {
             flashblock_index: self.flashblock_index + 1,
             target_gas_for_batch,
             target_da_for_batch,
             target_da_footprint_for_batch,
-            target_execution_time_per_batch_us,
+            base_ctx,
             ..self
         }
     }
@@ -289,7 +288,7 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
-            block_execution_time_limit_us: self.config.block_time.as_micros(),
+            base_ctx: BaseBuilderCtx::new(self.config.block_time.as_micros()),
         })
     }
 
@@ -449,8 +448,6 @@ where
             .da_config
             .max_da_block_size()
             .map(|da_limit| da_limit / flashblocks_per_block);
-        // Use flashblock interval as the execution time limit per flashblock (in microseconds)
-        let execution_time_per_batch_us = self.config.specific.interval.as_micros();
         // Check that builder tx won't affect fb limit too much
         if let Some(da_limit) = da_per_batch {
             // We error if we can't insert any tx aside from builder tx in flashblock
@@ -469,13 +466,12 @@ where
             target_flashblock_count: flashblocks_per_block,
             target_gas_for_batch: gas_per_batch,
             target_da_for_batch: da_per_batch,
-            target_da_footprint_for_batch: da_footprint_per_batch,
-            target_execution_time_per_batch_us: execution_time_per_batch_us,
             gas_per_batch,
             da_per_batch,
             da_footprint_per_batch,
-            execution_time_per_batch_us,
             disable_state_root,
+            target_da_footprint_for_batch: da_footprint_per_batch,
+            base_ctx: BaseFlashblocksCtx::new(&self.config.specific),
         };
 
         let mut fb_cancel = block_cancel.child_token();
@@ -699,7 +695,7 @@ where
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
             target_da_footprint_for_batch,
-            ctx.extra_ctx.target_execution_time_per_batch_us,
+            &(&ctx.extra_ctx.base_ctx).into(),
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
@@ -795,8 +791,7 @@ where
                     .flashblock_num_tx_histogram
                     .record(info.executed_transactions.len() as f64);
 
-                // Any unused DA carries over to the next batch. Add the
-                // per-flashblock limit to the last target for the accumulator.
+                // Update bundle_state for next iteration
                 if let Some(da_limit) = ctx.extra_ctx.da_per_batch {
                     if let Some(da) = target_da_for_batch.as_mut() {
                         *da += da_limit;
@@ -807,12 +802,9 @@ where
                     }
                 }
 
-                // Any unused gas carries over to the next batch. Add the
-                // per-flashblock limit to the last target for the accumulator.
                 let target_gas_for_batch =
                     ctx.extra_ctx.target_gas_for_batch + ctx.extra_ctx.gas_per_batch;
 
-                // Any unused DA footprint carries over to the next batch.
                 if let (Some(footprint), Some(da_footprint_limit)) = (
                     target_da_footprint_for_batch.as_mut(),
                     ctx.extra_ctx.da_footprint_per_batch,
@@ -820,19 +812,17 @@ where
                     *footprint += da_footprint_limit;
                 }
 
-                // Any unused execution time *does not* carry over to the next
-                // batch. Add the per-flashblock limit to the current value of
-                // the accumulator itself to discard the unused execution time.
-                let target_execution_time_per_batch_us = info
-                    .base_state
-                    .cumulative_execution_time_us
-                    + ctx.extra_ctx.execution_time_per_batch_us;
+                // Base addition: execution time does not carry over to the next batch
+                let next_base_ctx = ctx
+                    .extra_ctx
+                    .base_ctx
+                    .next(info.base_state.cumulative_execution_time_us);
 
                 let next_extra_ctx = ctx.extra_ctx.clone().next(
                     target_gas_for_batch,
                     target_da_for_batch,
                     target_da_footprint_for_batch,
-                    target_execution_time_per_batch_us,
+                    next_base_ctx,
                 );
 
                 info!(

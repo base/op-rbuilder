@@ -40,7 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
-    base::execution::{BaseBlockLimits, BaseTxUsage},
+    base::context::BaseBuilderCtx,
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -81,8 +81,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
-    /// Block execution time limit in microseconds
-    pub block_execution_time_limit_us: u128,
+    /// Base-specific builder context
+    pub base_ctx: BaseBuilderCtx,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -392,7 +392,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
         block_da_footprint_limit: Option<u64>,
-        block_execution_time_limit_us: u128,
+        base_ctx: &BaseBuilderCtx,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -470,7 +470,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 }
             }
 
-            // Upstream limit check
+            // ensure we still have capacity for this transaction
             if let Err(result) = info.is_tx_over_limits(
                 tx_da_size,
                 block_gas_limit,
@@ -488,17 +488,19 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 continue;
             }
 
-            // Base-specific limit check
-            let base_usage = BaseTxUsage::from_metering(&self.resource_metering, &tx_hash);
-            let base_limits = BaseBlockLimits {
-                execution_time_us: block_execution_time_limit_us,
+            // Base addition: execution time limit check
+            let base_usage = match info.base_state.check_tx(
+                &self.resource_metering,
+                &tx_hash,
+                base_ctx.block_execution_time_limit_us,
+            ) {
+                Ok(usage) => usage,
+                Err(exceeded) => {
+                    debug!(target: "payload_builder", ?exceeded, "Base limit exceeded");
+                    best_txs.mark_invalid(tx.signer(), tx.nonce());
+                    continue;
+                }
             };
-            if let Err(exceeded) = info.base_state.is_tx_over_base_limits(&base_usage, &base_limits)
-            {
-                debug!(target: "payload_builder", ?exceeded, "Base limit exceeded");
-                best_txs.mark_invalid(tx.signer(), tx.nonce());
-                continue;
-            }
 
             // A sequencer's block should never contain blob or deposit transactions from the pool.
             if tx.is_eip4844() || tx.is_deposit() {
