@@ -13,6 +13,7 @@ pub mod tx_signer;
 
 #[cfg(test)]
 pub mod mock_tx;
+pub mod base;
 mod resource_metering;
 #[cfg(any(test, feature = "testing"))]
 pub mod tests;

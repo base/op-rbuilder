@@ -40,11 +40,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
+    base::execution::{BaseBlockLimits, BaseTxUsage},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
-    primitives::reth::{
-        BlockLimits, ExecutionInfo, LimitContext, TxLimits, TxUsage, TxnExecutionResult,
-    },
+    primitives::reth::{ExecutionInfo, TxnExecutionResult},
     resource_metering::ResourceMetering,
     traits::PayloadTxsBounds,
     tx::MaybeRevertingTransaction,
@@ -450,12 +449,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
             num_txs_considered += 1;
 
-            let resource_usage = self.resource_metering.get(&tx_hash);
-            let tx_execution_time_us = resource_usage
-                .as_ref()
-                .map(|r| r.total_execution_time_us)
-                .unwrap_or(0);
-
             // TODO: ideally we should get this from the txpool stream
             if let Some(conditional) = conditional
                 && !conditional.matches_block_attributes(&block_attr)
@@ -477,29 +470,32 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 }
             }
 
-            let resource_limits = LimitContext {
-                block: BlockLimits {
-                    gas: block_gas_limit,
-                    data: block_da_limit,
-                    da_footprint: block_da_footprint_limit,
-                    execution_time_us: block_execution_time_limit_us,
-                },
-                tx: TxLimits { data: tx_da_limit },
-                da_footprint_gas_scalar: info.da_footprint_scalar,
-            };
-
-            let usage = TxUsage {
-                data_size: tx_da_size,
-                gas_limit: tx.gas_limit(),
-                execution_time_us: tx_execution_time_us,
-            };
-
-            // ensure we still have capacity for this transaction
-            if let Err(result) = info.is_tx_over_limits(&usage, &resource_limits) {
+            // Upstream limit check
+            if let Err(result) = info.is_tx_over_limits(
+                tx_da_size,
+                block_gas_limit,
+                tx_da_limit,
+                block_da_limit,
+                tx.gas_limit(),
+                info.da_footprint_scalar,
+                block_da_footprint_limit,
+            ) {
                 // we can't fit this transaction into the block, so we need to mark it as
                 // invalid which also removes all dependent transaction from
                 // the iterator before we can continue
                 log_txn(result);
+                best_txs.mark_invalid(tx.signer(), tx.nonce());
+                continue;
+            }
+
+            // Base-specific limit check
+            let base_usage = BaseTxUsage::from_metering(&self.resource_metering, &tx_hash);
+            let base_limits = BaseBlockLimits {
+                execution_time_us: block_execution_time_limit_us,
+            };
+            if let Err(exceeded) = info.base_state.is_tx_over_base_limits(&base_usage, &base_limits)
+            {
+                debug!(target: "payload_builder", ?exceeded, "Base limit exceeded");
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
@@ -595,8 +591,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.cumulative_gas_used += gas_used;
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
-            // record tx execution time
-            info.cumulative_execution_time_us += tx_execution_time_us;
+            // record Base-specific tx execution time
+            info.base_state.record_tx(&base_usage);
 
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {

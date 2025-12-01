@@ -823,8 +823,10 @@ where
                 // Any unused execution time *does not* carry over to the next
                 // batch. Add the per-flashblock limit to the current value of
                 // the accumulator itself to discard the unused execution time.
-                let target_execution_time_per_batch_us =
-                    info.cumulative_execution_time_us + ctx.extra_ctx.execution_time_per_batch_us;
+                let target_execution_time_per_batch_us = info
+                    .base_state
+                    .cumulative_execution_time_us
+                    + ctx.extra_ctx.execution_time_per_batch_us;
 
                 let next_extra_ctx = ctx.extra_ctx.clone().next(
                     target_gas_for_batch,
