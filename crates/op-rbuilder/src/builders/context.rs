@@ -500,8 +500,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 Ok(usage) => usage,
                 Err(exceeded) => {
                     exceeded.log_and_record(&self.base_ctx.metrics);
-                    best_txs.mark_invalid(tx.signer(), tx.nonce());
-                    continue;
+                    if self.base_ctx.enforce_limits {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    exceeded.usage()
                 }
             };
 

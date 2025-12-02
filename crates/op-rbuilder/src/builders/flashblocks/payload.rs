@@ -288,7 +288,10 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
-            base_ctx: BaseBuilderCtx::new(self.config.block_time.as_micros()),
+            base_ctx: BaseBuilderCtx::new(
+                self.config.block_time.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         })
     }
 
@@ -471,7 +474,10 @@ where
             da_footprint_per_batch,
             disable_state_root,
             target_da_footprint_for_batch: da_footprint_per_batch,
-            base_ctx: BaseFlashblocksCtx::new(self.config.specific.interval.as_micros()),
+            base_ctx: BaseFlashblocksCtx::new(
+                self.config.specific.interval.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         };
 
         let mut fb_cancel = block_cancel.child_token();

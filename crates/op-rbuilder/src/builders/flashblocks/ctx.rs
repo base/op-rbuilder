@@ -55,7 +55,10 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: builder_config.max_gas_per_txn,
             metrics,
             resource_metering: builder_config.resource_metering,
-            base_ctx: BaseBuilderCtx::new(builder_config.block_time.as_micros()),
+            base_ctx: BaseBuilderCtx::new(
+                builder_config.block_time.as_micros(),
+                builder_config.enforce_resource_metering,
+            ),
         })
     }
 

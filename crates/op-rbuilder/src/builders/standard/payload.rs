@@ -253,7 +253,10 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
-            base_ctx: BaseBuilderCtx::new(self.config.block_time.as_micros()),
+            base_ctx: BaseBuilderCtx::new(
+                self.config.block_time.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         };
 
         let builder = OpBuilder::new(best);

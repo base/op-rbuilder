@@ -51,7 +51,10 @@ pub struct OpRbuilderArgs {
     /// Whether to enable TIPS Resource Metering
     #[arg(long = "builder.enable-resource-metering", default_value = "false")]
     pub enable_resource_metering: bool,
-    /// Whether to enable TIPS Resource Metering
+    /// Whether to enforce resource metering limits (reject transactions that exceed limits)
+    #[arg(long = "builder.enforce-resource-metering", default_value = "false")]
+    pub enforce_resource_metering: bool,
+    /// Buffer size for resource metering data
     #[arg(
         long = "builder.resource-metering-buffer-size",
         default_value = "10000"

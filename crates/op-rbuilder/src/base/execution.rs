@@ -38,7 +38,19 @@ pub enum BaseLimitExceeded {
 }
 
 impl BaseLimitExceeded {
+    /// Returns the tx usage that caused the limit to be exceeded.
+    pub fn usage(&self) -> BaseTxUsage {
+        match self {
+            Self::ExecutionTime { tx_us, .. } => BaseTxUsage {
+                execution_time_us: *tx_us,
+            },
+        }
+    }
+
     /// Log and record metrics for this limit exceeded event.
+    ///
+    /// Only logs/records if this is the first tx to exceed the limit
+    /// (i.e., cumulative was within the limit before this tx).
     pub fn log_and_record(&self, metrics: &BaseMetrics) {
         match self {
             Self::ExecutionTime {
@@ -49,6 +61,11 @@ impl BaseLimitExceeded {
                 tx_gas,
                 remaining_gas,
             } => {
+                // Only log/record for the first tx that exceeds the limit
+                if *cumulative_us > *limit_us {
+                    return;
+                }
+
                 let remaining_us = limit_us.saturating_sub(*cumulative_us);
                 let exceeded_by_us = tx_us.saturating_sub(remaining_us);
                 warn!(
@@ -97,6 +114,7 @@ impl BaseExecutionState {
         let total = self
             .cumulative_execution_time_us
             .saturating_add(usage.execution_time_us);
+
         if total > execution_time_limit_us {
             let remaining_gas = block_gas_limit.saturating_sub(cumulative_gas_used);
             return Err(BaseLimitExceeded::ExecutionTime {
