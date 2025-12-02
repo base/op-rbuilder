@@ -1,5 +1,6 @@
 use super::super::context::OpPayloadBuilderCtx;
 use crate::{
+    base::context::BaseBuilderCtx,
     builders::{BuilderConfig, BuilderTransactions, generator::BuildArguments},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
@@ -252,6 +253,10 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            base_ctx: BaseBuilderCtx::new(
+                self.config.block_time.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         };
 
         let builder = OpBuilder::new(best);
@@ -415,6 +420,7 @@ impl<Txs: PayloadTxsBounds> OpBuilder<'_, Txs> {
                     block_gas_limit,
                     block_da_limit,
                     block_da_footprint,
+                    &ctx.base_ctx,
                 )?
                 .is_some()
             {

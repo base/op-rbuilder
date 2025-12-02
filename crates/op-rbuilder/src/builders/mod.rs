@@ -130,6 +130,9 @@ pub struct BuilderConfig<Specific: Clone> {
 
     /// Resource metering context
     pub resource_metering: ResourceMetering,
+
+    /// Whether to enforce resource metering limits
+    pub enforce_resource_metering: bool,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -171,6 +174,7 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             max_gas_per_txn: None,
             gas_limiter_config: GasLimiterArgs::default(),
             resource_metering: ResourceMetering::default(),
+            enforce_resource_metering: false,
         }
     }
 }
@@ -197,6 +201,7 @@ where
                 args.enable_resource_metering,
                 args.resource_metering_buffer_size,
             ),
+            enforce_resource_metering: args.enforce_resource_metering,
             specific: S::try_from(args)?,
         })
     }

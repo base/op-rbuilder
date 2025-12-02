@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
 use crate::{
+    base::context::BaseBuilderCtx,
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -80,6 +81,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
+    /// Base-specific builder context
+    pub base_ctx: BaseBuilderCtx,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -381,6 +384,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     /// Executes the given best transactions and updates the execution info.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_best_transactions<E: Debug + Default>(
         &self,
         info: &mut ExecutionInfo<E>,
@@ -389,6 +393,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         block_gas_limit: u64,
         block_da_limit: Option<u64>,
         block_da_footprint_limit: Option<u64>,
+        base_ctx: &BaseBuilderCtx,
     ) -> Result<Option<()>, PayloadBuilderError> {
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
@@ -445,8 +450,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
             num_txs_considered += 1;
 
-            let _resource_usage = self.resource_metering.get(&tx_hash);
-
             // TODO: ideally we should get this from the txpool stream
             if let Some(conditional) = conditional
                 && !conditional.matches_block_attributes(&block_attr)
@@ -485,6 +488,26 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 best_txs.mark_invalid(tx.signer(), tx.nonce());
                 continue;
             }
+
+            // Base addition: execution time limit check
+            let base_usage = match info.base_state.check_tx(
+                &self.resource_metering,
+                &tx_hash,
+                base_ctx.block_execution_time_limit_us,
+                tx.gas_limit(),
+                info.cumulative_gas_used,
+                block_gas_limit,
+            ) {
+                Ok(usage) => usage,
+                Err(exceeded) => {
+                    exceeded.log_and_record(&self.base_ctx.metrics);
+                    if self.base_ctx.enforce_limits {
+                        best_txs.mark_invalid(tx.signer(), tx.nonce());
+                        continue;
+                    }
+                    exceeded.usage()
+                }
+            };
 
             // A sequencer's block should never contain blob or deposit transactions from the pool.
             if tx.is_eip4844() || tx.is_deposit() {
@@ -577,6 +600,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.cumulative_gas_used += gas_used;
             // record tx da size
             info.cumulative_da_bytes_used += tx_da_size;
+            // record Base-specific tx execution time
+            info.base_state.record_tx(&base_usage);
 
             // Push transaction changeset and calculate header bloom filter for receipt.
             let ctx = ReceiptBuilderCtx {

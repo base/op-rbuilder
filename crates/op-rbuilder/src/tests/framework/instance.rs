@@ -2,6 +2,7 @@ use crate::{
     args::OpRbuilderArgs,
     builders::{BuilderConfig, FlashblocksBuilder, PayloadBuilder, StandardBuilder},
     primitives::reth::engine_api_builder::OpEngineApiBuilder,
+    resource_metering::{BaseApiExtServer, ResourceMeteringExt},
     revert_protection::{EthApiExtServer, RevertProtectionExt},
     tests::{
         EngineApi, Ipc, TEE_DEBUG_ADDRESS, TransactionPoolObserver, builder_signer, create_test_db,
@@ -110,6 +111,7 @@ impl LocalInstance {
 
         let builder_config = BuilderConfig::<P::Config>::try_from(args.clone())
             .expect("Failed to convert rollup args to builder config");
+        let resource_metering = builder_config.resource_metering.clone();
         let da_config = builder_config.da_config.clone();
         let gas_limit_config = builder_config.gas_limit_config.clone();
 
@@ -152,6 +154,10 @@ impl LocalInstance {
                     ctx.modules
                         .add_or_replace_configured(revert_protection_ext.into_rpc())?;
                 }
+
+                let resource_metering_ext = ResourceMeteringExt::new(resource_metering.clone());
+                ctx.modules
+                    .add_or_replace_configured(resource_metering_ext.into_rpc())?;
 
                 Ok(())
             })

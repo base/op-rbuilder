@@ -1,4 +1,5 @@
 //! Heavily influenced by [reth](https://github.com/paradigmxyz/reth/blob/1e965caf5fa176f244a31c0d2662ba1b590938db/crates/optimism/payload/src/builder.rs#L570)
+use crate::base::execution::BaseExecutionState;
 use alloy_primitives::{Address, U256};
 use core::fmt::Debug;
 use derive_more::Display;
@@ -42,6 +43,8 @@ pub struct ExecutionInfo<Extra: Debug + Default = ()> {
     pub extra: Extra,
     /// DA Footprint Scalar for Jovian
     pub da_footprint_scalar: Option<u16>,
+    /// Base-specific execution state
+    pub base_state: BaseExecutionState,
 }
 
 impl<T: Debug + Default> ExecutionInfo<T> {
@@ -56,6 +59,7 @@ impl<T: Debug + Default> ExecutionInfo<T> {
             total_fees: U256::ZERO,
             extra: Default::default(),
             da_footprint_scalar: None,
+            base_state: BaseExecutionState::default(),
         }
     }
 

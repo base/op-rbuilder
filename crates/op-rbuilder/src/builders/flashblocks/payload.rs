@@ -1,5 +1,6 @@
 use super::{config::FlashblocksConfig, wspub::WebSocketPublisher};
 use crate::{
+    base::{context::BaseBuilderCtx, flashblocks::BaseFlashblocksCtx},
     builders::{
         BuilderConfig,
         builder_tx::BuilderTransactions,
@@ -94,6 +95,8 @@ pub struct FlashblocksExtraCtx {
     da_footprint_per_batch: Option<u64>,
     /// Whether to disable state root calculation for each flashblock
     disable_state_root: bool,
+    /// Base-specific flashblocks context
+    base_ctx: BaseFlashblocksCtx,
 }
 
 impl FlashblocksExtraCtx {
@@ -102,12 +105,14 @@ impl FlashblocksExtraCtx {
         target_gas_for_batch: u64,
         target_da_for_batch: Option<u64>,
         target_da_footprint_for_batch: Option<u64>,
+        base_ctx: BaseFlashblocksCtx,
     ) -> Self {
         Self {
             flashblock_index: self.flashblock_index + 1,
             target_gas_for_batch,
             target_da_for_batch,
             target_da_footprint_for_batch,
+            base_ctx,
             ..self
         }
     }
@@ -283,6 +288,10 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            base_ctx: BaseBuilderCtx::new(
+                self.config.block_time.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         })
     }
 
@@ -465,6 +474,10 @@ where
             da_footprint_per_batch,
             disable_state_root,
             target_da_footprint_for_batch: da_footprint_per_batch,
+            base_ctx: BaseFlashblocksCtx::new(
+                self.config.specific.interval.as_micros(),
+                self.config.enforce_resource_metering,
+            ),
         };
 
         let mut fb_cancel = block_cancel.child_token();
@@ -688,6 +701,7 @@ where
             target_gas_for_batch.min(ctx.block_gas_limit()),
             target_da_for_batch,
             target_da_footprint_for_batch,
+            &(&ctx.extra_ctx.base_ctx).into(),
         )
         .wrap_err("failed to execute best transactions")?;
         // Extract last transactions
@@ -804,10 +818,17 @@ where
                     *footprint += da_footprint_limit;
                 }
 
+                // Base addition: execution time does not carry over to the next batch
+                let next_base_ctx = ctx
+                    .extra_ctx
+                    .base_ctx
+                    .next(info.base_state.cumulative_execution_time_us);
+
                 let next_extra_ctx = ctx.extra_ctx.clone().next(
                     target_gas_for_batch,
                     target_da_for_batch,
                     target_da_footprint_for_batch,
+                    next_base_ctx,
                 );
 
                 info!(
