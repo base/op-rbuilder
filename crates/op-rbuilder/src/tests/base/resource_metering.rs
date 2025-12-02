@@ -17,6 +17,7 @@ const EXECUTION_LIMIT_MS: u64 = 200;
     let mut args = OpRbuilderArgs::default();
     args.chain_block_time = EXECUTION_LIMIT_MS;
     args.enable_resource_metering = true;
+    args.enforce_resource_metering = true;
     args.flashblocks.flashblocks_block_time = EXECUTION_LIMIT_MS;
     args
 })]
@@ -105,6 +106,7 @@ async fn missing_metering_information_defaults_to_zero(
         let mut args = OpRbuilderArgs::default();
         args.chain_block_time = EXECUTION_LIMIT_MS;
         args.enable_resource_metering = true;
+        args.enforce_resource_metering = true;
         args.flashblocks.flashblocks_block_time = EXECUTION_LIMIT_MS / 2;
         args
     }
