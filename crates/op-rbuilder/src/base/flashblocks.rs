@@ -29,7 +29,8 @@ impl BaseFlashblocksCtx {
     /// Unlike gas and DA, execution time does not carry over to the next batch.
     pub fn next(self, cumulative_execution_time_us: u128) -> Self {
         Self {
-            target_execution_time_us: cumulative_execution_time_us + self.execution_time_per_batch_us,
+            target_execution_time_us: cumulative_execution_time_us
+                + self.execution_time_per_batch_us,
             ..self
         }
     }

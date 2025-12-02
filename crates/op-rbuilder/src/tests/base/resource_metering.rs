@@ -53,9 +53,7 @@ async fn execution_time_limit_rejects_excessive_transactions(
     args.flashblocks.flashblocks_block_time = EXECUTION_LIMIT_MS;
     args
 })]
-async fn non_enforcing_mode_includes_all_transactions(
-    rbuilder: LocalInstance,
-) -> eyre::Result<()> {
+async fn non_enforcing_mode_includes_all_transactions(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
     enable_metering(driver.provider()).await?;
 
