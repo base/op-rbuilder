@@ -1,7 +1,6 @@
 //! Base-specific flashblocks context.
 
 use super::context::BaseBuilderCtx;
-use crate::builders::flashblocks::FlashblocksConfig;
 
 /// Base-specific flashblocks context for per-batch execution time tracking.
 /// Add this as a single field to FlashblocksExtraCtx to minimize diff.
@@ -14,9 +13,8 @@ pub struct BaseFlashblocksCtx {
 }
 
 impl BaseFlashblocksCtx {
-    /// Create a new BaseFlashblocksCtx from flashblocks config.
-    pub fn new(config: &FlashblocksConfig) -> Self {
-        let execution_time_per_batch_us = config.interval.as_micros();
+    /// Create a new BaseFlashblocksCtx with the given execution time limit per batch.
+    pub fn new(execution_time_per_batch_us: u128) -> Self {
         Self {
             target_execution_time_us: execution_time_per_batch_us,
             execution_time_per_batch_us,
