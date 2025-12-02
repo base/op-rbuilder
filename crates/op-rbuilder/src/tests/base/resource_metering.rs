@@ -43,6 +43,39 @@ async fn execution_time_limit_rejects_excessive_transactions(
     Ok(())
 }
 
+/// When enforce_resource_metering is false (the default), transactions that exceed
+/// the execution time limit should still be included - only logging/metrics occur.
+#[rb_test(args = {
+    let mut args = OpRbuilderArgs::default();
+    args.chain_block_time = EXECUTION_LIMIT_MS;
+    args.enable_resource_metering = true;
+    args.enforce_resource_metering = false;
+    args.flashblocks.flashblocks_block_time = EXECUTION_LIMIT_MS;
+    args
+})]
+async fn non_enforcing_mode_includes_all_transactions(
+    rbuilder: LocalInstance,
+) -> eyre::Result<()> {
+    let driver = rbuilder.driver().await?;
+    enable_metering(driver.provider()).await?;
+
+    // Both transactions exceed the limit together (120k + 120k > 200k)
+    let first = send_metered_tx(&driver, 120_000).await?;
+    let second = send_metered_tx(&driver, 120_000).await?;
+
+    let block = driver.build_new_block().await?;
+    assert!(
+        block.includes(&first),
+        "first transaction should be included"
+    );
+    assert!(
+        block.includes(&second),
+        "second transaction should be included when not enforcing limits"
+    );
+
+    Ok(())
+}
+
 #[rb_test(args = {
     let mut args = OpRbuilderArgs::default();
     args.chain_block_time = EXECUTION_LIMIT_MS;
@@ -97,6 +130,52 @@ async fn missing_metering_information_defaults_to_zero(
         "execution budget should account only for metered time"
     );
 
+    Ok(())
+}
+
+/// When enforce_resource_metering is false in flashblocks mode, transactions that exceed
+/// the per-batch execution time limit should still be included in the same flashblock.
+#[rb_test(
+    flashblocks,
+    args = {
+        let mut args = OpRbuilderArgs::default();
+        args.chain_block_time = EXECUTION_LIMIT_MS;
+        args.enable_resource_metering = true;
+        args.enforce_resource_metering = false;
+        args.flashblocks.flashblocks_block_time = EXECUTION_LIMIT_MS / 2;
+        args
+    }
+)]
+async fn flashblock_non_enforcing_mode_includes_all_in_same_batch(
+    rbuilder: LocalInstance,
+) -> eyre::Result<()> {
+    let listener = rbuilder.spawn_flashblocks_listener();
+    let driver = rbuilder.driver().await?;
+    enable_metering(driver.provider()).await?;
+
+    // Both transactions exceed the per-batch limit together (60k + 60k > 100k)
+    let first = send_metered_tx(&driver, 60_000).await?;
+    let second = send_metered_tx(&driver, 60_000).await?;
+
+    let block = driver.build_new_block().await?;
+    assert!(
+        block.includes(&first),
+        "first transaction should be included"
+    );
+    assert!(
+        block.includes(&second),
+        "second transaction should be included when not enforcing limits"
+    );
+
+    // Both should land in the same flashblock when not enforcing
+    let first_fb = wait_for_flashblock(&listener, &first).await?;
+    let second_fb = wait_for_flashblock(&listener, &second).await?;
+    assert_eq!(
+        first_fb, second_fb,
+        "both txs should be in the same flashblock when not enforcing limits"
+    );
+
+    listener.stop().await?;
     Ok(())
 }
 
