@@ -493,10 +493,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 &self.resource_metering,
                 &tx_hash,
                 base_ctx.block_execution_time_limit_us,
+                tx.gas_limit(),
+                info.cumulative_gas_used,
+                block_gas_limit,
             ) {
                 Ok(usage) => usage,
                 Err(exceeded) => {
-                    debug!(target: "payload_builder", ?exceeded, "Base limit exceeded");
+                    exceeded.log_and_record(&self.base_ctx.metrics);
                     best_txs.mark_invalid(tx.signer(), tx.nonce());
                     continue;
                 }

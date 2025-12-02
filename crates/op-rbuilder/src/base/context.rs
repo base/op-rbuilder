@@ -1,11 +1,15 @@
 //! Base-specific builder context.
 
+use super::metrics::BaseMetrics;
+
 /// Base-specific context for payload building.
 /// Add this as a single field to OpPayloadBuilderCtx to minimize diff.
 #[derive(Debug, Default, Clone)]
 pub struct BaseBuilderCtx {
     /// Block execution time limit in microseconds
     pub block_execution_time_limit_us: u128,
+    /// Base-specific metrics
+    pub metrics: BaseMetrics,
 }
 
 impl BaseBuilderCtx {
@@ -13,6 +17,7 @@ impl BaseBuilderCtx {
     pub fn new(block_execution_time_limit_us: u128) -> Self {
         Self {
             block_execution_time_limit_us,
+            metrics: Default::default(),
         }
     }
 }
