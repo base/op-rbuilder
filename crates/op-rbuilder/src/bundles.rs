@@ -53,15 +53,15 @@ impl BackrunBundleStore {
         let backrun_txs: Vec<Recovered<OpTxEnvelope>> = bundle.txs[1..].to_vec();
 
         // Handle LRU eviction
-        if self.data.lru.is_full() {
-            if let Ok(evicted_hash) = self.data.lru.pop() {
-                self.data.by_target_tx.remove(&evicted_hash);
-                warn!(
-                    target: "backrun_bundles",
-                    evicted_target = ?evicted_hash,
-                    "Evicted old backrun bundle"
-                );
-            }
+        if self.data.lru.is_full()
+            && let Ok(evicted_hash) = self.data.lru.pop()
+        {
+            self.data.by_target_tx.remove(&evicted_hash);
+            warn!(
+                target: "backrun_bundles",
+                evicted_target = ?evicted_hash,
+                "Evicted old backrun bundle"
+            );
         }
 
         // Add target to LRU queue

@@ -37,7 +37,7 @@ use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
 use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::{
     gas_limiter::AddressGasLimiter,
@@ -606,19 +606,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.executed_transactions.push(tx.into_inner());
 
             // Execute backrun bundles for this transaction if it succeeded
-            if is_success {
-                if let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
-                    info!(
-                        target: "backrun_bundles",
-                        target_tx = ?tx_hash,
-                        bundle_count = backrun_bundles.len(),
-                        "Found backrun bundles for transaction"
-                    );
-
-                    self.metrics.backrun_target_txs_found_total.increment(1);
-
-                    // TODO: Execute backrun bundles
-                }
+            if is_success && let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
+                info!(target: "backrun_bundles", target_tx = ?tx_hash, bundle_count = backrun_bundles.len(), "Found backrun bundles for transaction");
+                self.metrics.backrun_target_txs_found_total.increment(1);
+                // TODO: Execute backrun bundles
             }
         }
 
