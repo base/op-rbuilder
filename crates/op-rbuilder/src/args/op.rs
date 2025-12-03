@@ -78,7 +78,11 @@ pub struct OpRbuilderArgs {
 
     /// Native Bundler Configuration
     /// Enable native bundler in block builder
-    #[arg(long = "builder.enable-native-bundler", default_value = "false", env = "ENABLE_NATIVE_BUNDLER")]
+    #[arg(
+        long = "builder.enable-native-bundler",
+        default_value = "false",
+        env = "ENABLE_NATIVE_BUNDLER"
+    )]
     pub enable_native_bundler: bool,
 
     /// Secret key for bundler transactions  
@@ -86,11 +90,19 @@ pub struct OpRbuilderArgs {
     pub bundler_signer: Option<Signer>,
 
     /// Percentage of block gas to reserve for bundles after threshold
-    #[arg(long = "bundler.gas-reserve-percentage", default_value = "20", env = "BUNDLER_GAS_RESERVE_PERCENTAGE")]
+    #[arg(
+        long = "bundler.gas-reserve-percentage",
+        default_value = "20",
+        env = "BUNDLER_GAS_RESERVE_PERCENTAGE"
+    )]
     pub bundler_gas_reserve_percentage: u8,
 
     /// Threshold percentage of block gas before starting bundle reservation
-    #[arg(long = "bundler.gas-threshold", default_value = "80", env = "BUNDLER_GAS_THRESHOLD")]
+    #[arg(
+        long = "bundler.gas-threshold",
+        default_value = "80",
+        env = "BUNDLER_GAS_THRESHOLD"
+    )]
     pub bundler_gas_threshold: u8,
 
     /// UserOperation pool URL (if not provided, bundling is disabled)

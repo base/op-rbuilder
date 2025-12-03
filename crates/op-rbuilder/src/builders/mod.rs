@@ -134,16 +134,16 @@ pub struct BuilderConfig<Specific: Clone> {
     /// Native Bundler Configuration
     /// Whether native bundler is enabled
     pub enable_native_bundler: bool,
-    
+
     /// Bundler signer for bundle transactions
     pub bundler_signer: Option<Signer>,
-    
+
     /// Percentage of gas to reserve for bundles
     pub bundler_gas_reserve_percentage: u8,
-    
+
     /// Threshold before reserving gas for bundles
     pub bundler_gas_threshold: u8,
-    
+
     /// UserOperation pool connection URL
     pub bundler_pool_url: Option<String>,
 }
@@ -171,9 +171,16 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("enable_native_bundler", &self.enable_native_bundler)
             .field(
                 "bundler_signer",
-                &self.bundler_signer.as_ref().map(|s| s.address.to_string()).unwrap_or_else(|| "None".to_string()),
+                &self
+                    .bundler_signer
+                    .as_ref()
+                    .map(|s| s.address.to_string())
+                    .unwrap_or_else(|| "None".to_string()),
             )
-            .field("bundler_gas_reserve_percentage", &self.bundler_gas_reserve_percentage)
+            .field(
+                "bundler_gas_reserve_percentage",
+                &self.bundler_gas_reserve_percentage,
+            )
             .field("bundler_gas_threshold", &self.bundler_gas_threshold)
             .field("bundler_pool_url", &self.bundler_pool_url)
             .finish()
@@ -227,7 +234,7 @@ where
                 args.resource_metering_buffer_size,
             ),
             enable_native_bundler: args.enable_native_bundler,
-            bundler_signer: args.bundler_signer.clone(),
+            bundler_signer: args.bundler_signer,
             bundler_gas_reserve_percentage: args.bundler_gas_reserve_percentage,
             bundler_gas_threshold: args.bundler_gas_threshold,
             bundler_pool_url: args.bundler_pool_url.clone(),

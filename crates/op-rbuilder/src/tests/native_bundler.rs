@@ -12,19 +12,19 @@ async fn native_bundler_disabled_by_default(rbuilder: LocalInstance) -> eyre::Re
     // The default config should have native bundler disabled
     // This test verifies that existing functionality is not affected
     // when the feature flag is off
-    
+
     let driver = rbuilder.driver().await?;
-    
+
     // Build a block without any special bundler logic
     let block = driver.build_new_block_with_current_timestamp(None).await?;
-    
+
     // Should only have the standard transactions (deposit + builder tx)
     // No bundle transactions should be present
     assert!(
         block.transactions.len() >= 2,
         "Block should have at least deposit and builder transactions"
     );
-    
+
     Ok(())
 }
 
@@ -39,7 +39,7 @@ async fn native_bundler_disabled_by_default(rbuilder: LocalInstance) -> eyre::Re
 })]
 async fn native_bundler_with_mock_pool(rbuilder: LocalInstance) -> eyre::Result<()> {
     let driver = rbuilder.driver().await?;
-    
+
     // Send some regular transactions to fill up the block
     for _ in 0..5 {
         driver
@@ -48,22 +48,22 @@ async fn native_bundler_with_mock_pool(rbuilder: LocalInstance) -> eyre::Result<
             .send()
             .await?;
     }
-    
+
     // Build a block - with mock pool, no bundles will be created yet
     // This just tests that the feature flag doesn't break block building
     let block = driver.build_new_block_with_current_timestamp(None).await?;
-    
+
     // Should have regular transactions
     assert!(
         block.transactions.len() >= 7, // 5 user txs + deposit + builder tx
         "Block should include sent transactions"
     );
-    
+
     // TODO: (BA-3414) Once pool connection is implemented, we would test:
     // - Gas reservation occurs at threshold
     // - Bundle transaction is included
     // - Proper gas accounting
-    
+
     Ok(())
 }
 
@@ -81,7 +81,7 @@ async fn native_bundler_gas_reservation(_rbuilder: LocalInstance) -> eyre::Resul
     // 1. Regular txs process until 80% gas used
     // 2. Remaining 20% is reserved for bundles
     // 3. Bundle transactions get included in reserved space
-    
+
     Ok(())
 }
 
@@ -101,13 +101,16 @@ mod cli_tests {
             "--bundler.gas-threshold=70",
             "--bundler.pool-url=http://localhost:50051",
         ]);
-        
+
         if let reth_optimism_cli::commands::Commands::Node(node_command) = cli.command {
             let args = node_command.ext;
             assert!(args.enable_native_bundler);
             assert_eq!(args.bundler_gas_reserve_percentage, 30);
             assert_eq!(args.bundler_gas_threshold, 70);
-            assert_eq!(args.bundler_pool_url, Some("http://localhost:50051".to_string()));
+            assert_eq!(
+                args.bundler_pool_url,
+                Some("http://localhost:50051".to_string())
+            );
         } else {
             panic!("Expected node command");
         }
@@ -116,12 +119,8 @@ mod cli_tests {
     #[test]
     fn test_native_bundler_cli_defaults() {
         // Test that defaults work correctly when only enabling the feature
-        let cli = Cli::parse_from([
-            "test",
-            "node",
-            "--builder.enable-native-bundler",
-        ]);
-        
+        let cli = Cli::parse_from(["test", "node", "--builder.enable-native-bundler"]);
+
         if let reth_optimism_cli::commands::Commands::Node(node_command) = cli.command {
             let args = node_command.ext;
             assert!(args.enable_native_bundler);
