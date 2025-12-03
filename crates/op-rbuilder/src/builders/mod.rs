@@ -130,6 +130,22 @@ pub struct BuilderConfig<Specific: Clone> {
 
     /// Resource metering context
     pub resource_metering: ResourceMetering,
+
+    /// Native Bundler Configuration
+    /// Whether native bundler is enabled
+    pub enable_native_bundler: bool,
+    
+    /// Bundler signer for bundle transactions
+    pub bundler_signer: Option<Signer>,
+    
+    /// Percentage of gas to reserve for bundles
+    pub bundler_gas_reserve_percentage: u8,
+    
+    /// Threshold before reserving gas for bundles
+    pub bundler_gas_threshold: u8,
+    
+    /// UserOperation pool connection URL
+    pub bundler_pool_url: Option<String>,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -152,6 +168,14 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("specific", &self.specific)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gas_limiter_config", &self.gas_limiter_config)
+            .field("enable_native_bundler", &self.enable_native_bundler)
+            .field(
+                "bundler_signer",
+                &self.bundler_signer.as_ref().map(|s| s.address.to_string()).unwrap_or_else(|| "None".to_string()),
+            )
+            .field("bundler_gas_reserve_percentage", &self.bundler_gas_reserve_percentage)
+            .field("bundler_gas_threshold", &self.bundler_gas_threshold)
+            .field("bundler_pool_url", &self.bundler_pool_url)
             .finish()
     }
 }
@@ -171,6 +195,11 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             max_gas_per_txn: None,
             gas_limiter_config: GasLimiterArgs::default(),
             resource_metering: ResourceMetering::default(),
+            enable_native_bundler: false,
+            bundler_signer: None,
+            bundler_gas_reserve_percentage: 20,
+            bundler_gas_threshold: 80,
+            bundler_pool_url: None,
         }
     }
 }
@@ -197,6 +226,11 @@ where
                 args.enable_resource_metering,
                 args.resource_metering_buffer_size,
             ),
+            enable_native_bundler: args.enable_native_bundler,
+            bundler_signer: args.bundler_signer.clone(),
+            bundler_gas_reserve_percentage: args.bundler_gas_reserve_percentage,
+            bundler_gas_threshold: args.bundler_gas_threshold,
+            bundler_pool_url: args.bundler_pool_url.clone(),
             specific: S::try_from(args)?,
         })
     }
