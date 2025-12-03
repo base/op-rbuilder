@@ -8,7 +8,7 @@ use jsonrpsee::{
 use op_alloy_consensus::OpTxEnvelope;
 use std::{fmt::Debug, sync::Arc};
 use tips_core::{Bundle, types::ParsedBundle};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::metrics::OpRBuilderMetrics;
 
@@ -64,17 +64,15 @@ impl BackrunBundleStore {
             );
         }
 
-        // Add target to LRU queue
         let _ = self.data.lru.push(target_tx_hash);
 
-        // Store backrun txs
         self.data
             .by_target_tx
             .entry(target_tx_hash)
             .or_insert_with(Vec::new)
             .push(backrun_txs.clone());
 
-        info!(
+        debug!(
             target: "backrun_bundles",
             target_tx = ?target_tx_hash,
             backrun_tx_count = backrun_txs.len(),
@@ -88,7 +86,6 @@ impl BackrunBundleStore {
         Ok(())
     }
 
-    /// Get all backrun bundles for a target transaction
     pub fn get(&self, target_tx_hash: &TxHash) -> Option<Vec<Vec<Recovered<OpTxEnvelope>>>> {
         self.data
             .by_target_tx
@@ -96,7 +93,6 @@ impl BackrunBundleStore {
             .map(|entry| entry.clone())
     }
 
-    /// Remove backrun bundles for a target (after execution or expiry)
     pub fn remove(&self, target_tx_hash: &TxHash) {
         if let Some((_, bundles)) = self.data.by_target_tx.remove(target_tx_hash) {
             debug!(
@@ -112,7 +108,6 @@ impl BackrunBundleStore {
         }
     }
 
-    /// Get count of target transactions with backrun bundles
     pub fn len(&self) -> usize {
         self.data.by_target_tx.len()
     }
@@ -123,10 +118,6 @@ impl Default for BackrunBundleStore {
         Self::new(10_000)
     }
 }
-
-// ============================================================================
-// RPC API for receiving backrun bundles
-// ============================================================================
 
 #[cfg_attr(not(test), rpc(server, namespace = "base"))]
 #[cfg_attr(test, rpc(server, client, namespace = "base"))]
@@ -154,7 +145,6 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
     async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()> {
         self.metrics.backrun_bundles_received_total.increment(1);
 
-        // Parse and validate bundle (convert Bundle -> ParsedBundle)
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
             jsonrpsee::types::ErrorObject::owned(
@@ -164,7 +154,6 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
             )
         })?;
 
-        // Store in BackrunBundleStore keyed by target_tx_hash (txs[0])
         self.bundle_store.insert(parsed_bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to store bundle");
             jsonrpsee::types::ErrorObject::owned(
