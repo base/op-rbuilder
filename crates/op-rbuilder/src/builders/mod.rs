@@ -130,6 +130,22 @@ pub struct BuilderConfig<Specific: Clone> {
 
     /// Resource metering context
     pub resource_metering: ResourceMetering,
+
+    /// Account Abstraction (AA) Native Bundler Configuration
+    /// Whether AA native bundler is enabled
+    pub enable_aa_bundler: bool,
+
+    /// AA bundler signer for bundle transactions
+    pub aa_bundler_signer: Option<Signer>,
+
+    /// Percentage of gas to reserve for AA bundles
+    pub aa_gas_reserve_percentage: u8,
+
+    /// Threshold before reserving gas for AA bundles
+    pub aa_gas_threshold: u8,
+
+    /// UserOperation pool connection URL
+    pub aa_pool_url: Option<String>,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -152,6 +168,18 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("specific", &self.specific)
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gas_limiter_config", &self.gas_limiter_config)
+            .field("enable_aa_bundler", &self.enable_aa_bundler)
+            .field(
+                "aa_bundler_signer",
+                &self
+                    .aa_bundler_signer
+                    .as_ref()
+                    .map(|s| s.address.to_string())
+                    .unwrap_or_else(|| "None".to_string()),
+            )
+            .field("aa_gas_reserve_percentage", &self.aa_gas_reserve_percentage)
+            .field("aa_gas_threshold", &self.aa_gas_threshold)
+            .field("aa_pool_url", &self.aa_pool_url)
             .finish()
     }
 }
@@ -171,6 +199,11 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             max_gas_per_txn: None,
             gas_limiter_config: GasLimiterArgs::default(),
             resource_metering: ResourceMetering::default(),
+            enable_aa_bundler: false,
+            aa_bundler_signer: None,
+            aa_gas_reserve_percentage: 20,
+            aa_gas_threshold: 80,
+            aa_pool_url: None,
         }
     }
 }
@@ -197,6 +230,11 @@ where
                 args.enable_resource_metering,
                 args.resource_metering_buffer_size,
             ),
+            enable_aa_bundler: args.enable_aa_bundler,
+            aa_bundler_signer: args.aa_bundler_signer,
+            aa_gas_reserve_percentage: args.aa_gas_reserve_percentage,
+            aa_gas_threshold: args.aa_gas_threshold,
+            aa_pool_url: args.aa_pool_url.clone(),
             specific: S::try_from(args)?,
         })
     }
