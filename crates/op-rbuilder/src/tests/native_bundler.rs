@@ -31,10 +31,10 @@ async fn native_bundler_disabled_by_default(rbuilder: LocalInstance) -> eyre::Re
 /// Test native bundler with feature flag enabled
 /// This test will be expanded once pool connection is implemented
 #[rb_test(args = OpRbuilderArgs {
-    enable_native_bundler: true,
-    bundler_gas_reserve_percentage: 25,
-    bundler_gas_threshold: 75,
-    // bundler_pool_url will be None, so it uses mock pool
+    enable_aa_bundler: true,
+    aa_gas_reserve_percentage: 25,
+    aa_gas_threshold: 75,
+    // aa_pool_url will be None, so it uses mock pool
     ..Default::default()
 })]
 async fn native_bundler_with_mock_pool(rbuilder: LocalInstance) -> eyre::Result<()> {
@@ -70,9 +70,9 @@ async fn native_bundler_with_mock_pool(rbuilder: LocalInstance) -> eyre::Result<
 /// Test gas reservation threshold
 /// This will be properly implemented in BA-3417
 #[rb_test(args = OpRbuilderArgs {
-    enable_native_bundler: true,
-    bundler_gas_reserve_percentage: 20,
-    bundler_gas_threshold: 80,
+    enable_aa_bundler: true,
+    aa_gas_reserve_percentage: 20,
+    aa_gas_threshold: 80,
     ..Default::default()
 })]
 async fn native_bundler_gas_reservation(_rbuilder: LocalInstance) -> eyre::Result<()> {
@@ -96,21 +96,18 @@ mod cli_tests {
         let cli = Cli::parse_from([
             "test",
             "node",
-            "--builder.enable-native-bundler",
-            "--bundler.gas-reserve-percentage=30",
-            "--bundler.gas-threshold=70",
-            "--bundler.pool-url=http://localhost:50051",
+            "--builder.enable-aa-bundler",
+            "--aa.gas-reserve-percentage=30",
+            "--aa.gas-threshold=70",
+            "--aa.pool-url=http://localhost:50051",
         ]);
 
         if let reth_optimism_cli::commands::Commands::Node(node_command) = cli.command {
             let args = node_command.ext;
-            assert!(args.enable_native_bundler);
-            assert_eq!(args.bundler_gas_reserve_percentage, 30);
-            assert_eq!(args.bundler_gas_threshold, 70);
-            assert_eq!(
-                args.bundler_pool_url,
-                Some("http://localhost:50051".to_string())
-            );
+            assert!(args.enable_aa_bundler);
+            assert_eq!(args.aa_gas_reserve_percentage, 30);
+            assert_eq!(args.aa_gas_threshold, 70);
+            assert_eq!(args.aa_pool_url, Some("http://localhost:50051".to_string()));
         } else {
             panic!("Expected node command");
         }
@@ -119,14 +116,14 @@ mod cli_tests {
     #[test]
     fn test_native_bundler_cli_defaults() {
         // Test that defaults work correctly when only enabling the feature
-        let cli = Cli::parse_from(["test", "node", "--builder.enable-native-bundler"]);
+        let cli = Cli::parse_from(["test", "node", "--builder.enable-aa-bundler"]);
 
         if let reth_optimism_cli::commands::Commands::Node(node_command) = cli.command {
             let args = node_command.ext;
-            assert!(args.enable_native_bundler);
-            assert_eq!(args.bundler_gas_reserve_percentage, 20); // default
-            assert_eq!(args.bundler_gas_threshold, 80); // default
-            assert!(args.bundler_pool_url.is_none());
+            assert!(args.enable_aa_bundler);
+            assert_eq!(args.aa_gas_reserve_percentage, 20); // default
+            assert_eq!(args.aa_gas_threshold, 80); // default
+            assert!(args.aa_pool_url.is_none());
         } else {
             panic!("Expected node command");
         }
