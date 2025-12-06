@@ -8,7 +8,7 @@ use jsonrpsee::{
 use op_alloy_consensus::OpTxEnvelope;
 use std::{fmt::Debug, sync::Arc};
 use tips_core::{Bundle, types::ParsedBundle};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::metrics::OpRBuilderMetrics;
 
@@ -72,7 +72,7 @@ impl BackrunBundleStore {
             .or_insert_with(Vec::new)
             .push(backrun_txs.clone());
 
-        debug!(
+        info!(
             target: "backrun_bundles",
             target_tx = ?target_tx_hash,
             backrun_tx_count = backrun_txs.len(),
@@ -144,6 +144,8 @@ impl BundlesApiExt {
 impl BaseBundlesApiExtServer for BundlesApiExt {
     async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()> {
         self.metrics.backrun_bundles_received_total.increment(1);
+
+        info!(message = "Received backrun bundle", tx_hashes = ?bundle.reverting_tx_hashes);
 
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
