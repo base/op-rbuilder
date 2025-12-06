@@ -80,6 +80,8 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
+    /// Backrun bundle store for storing backrun transactions
+    pub backrun_bundle_store: crate::bundles::BackrunBundleStore,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -433,7 +435,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 is_bundle_tx && !reverted_hashes.unwrap().contains(&tx_hash);
 
             let log_txn = |result: TxnExecutionResult| {
-                debug!(
+                info!(
                     target: "payload_builder",
                     message = "Considering transaction",
                     tx_hash = ?tx_hash,
@@ -543,7 +545,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 continue;
             }
 
-            if result.is_success() {
+            let is_success = result.is_success();
+
+            if is_success {
                 log_txn(TxnExecutionResult::Success);
                 num_txs_simulated_success += 1;
                 self.metrics.successful_tx_gas_used.record(gas_used as f64);
@@ -600,6 +604,15 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             // append sender and transaction to the respective lists
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
+
+            info!(message = "Executed transaction", tx_hash = ?tx_hash);
+
+            // Execute backrun bundles for this transaction if it succeeded
+            if is_success && let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
+                info!(target: "backrun_bundles", target_tx = ?tx_hash, bundle_count = backrun_bundles.len(), "Found backrun bundles for transaction");
+                self.metrics.backrun_target_txs_found_total.increment(1);
+                // TODO: Execute backrun bundles
+            }
         }
 
         let payload_transaction_simulation_time = execute_txs_start_time.elapsed();

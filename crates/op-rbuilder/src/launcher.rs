@@ -4,6 +4,7 @@ use reth_optimism_rpc::OpEthApiBuilder;
 use crate::{
     args::*,
     builders::{BuilderConfig, BuilderMode, FlashblocksBuilder, PayloadBuilder, StandardBuilder},
+    bundles::{BaseBundlesApiExtServer, BundlesApiExt},
     metrics::{VERSION, record_flag_gauge_metrics},
     monitor_tx_pool::monitor_tx_pool,
     primitives::reth::engine_api_builder::OpEngineApiBuilder,
@@ -57,7 +58,8 @@ pub fn launch() -> Result<()> {
         }
         BuilderMode::Flashblocks => {
             tracing::info!("Starting OP builder in flashblocks mode");
-            let launcher = BuilderLauncher::<FlashblocksBuilder>::new();
+            let launcher: BuilderLauncher<FlashblocksBuilder> =
+                BuilderLauncher::<FlashblocksBuilder>::new();
             cli_app.run(launcher)?;
         }
     }
@@ -111,6 +113,7 @@ where
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_copy = reverted_cache.clone();
         let resource_metering = builder_config.resource_metering.clone();
+        let backrun_bundle_store = builder_config.backrun_bundle_store.clone();
 
         let mut addons: OpAddOns<
             _,
@@ -167,8 +170,12 @@ where
                 }
 
                 let resource_metering_ext = ResourceMeteringExt::new(resource_metering);
+                let bundles_ext = BundlesApiExt::new(backrun_bundle_store);
+
                 ctx.modules
                     .add_or_replace_configured(resource_metering_ext.into_rpc())?;
+                ctx.modules
+                    .add_or_replace_configured(bundles_ext.into_rpc())?;
 
                 Ok(())
             })
