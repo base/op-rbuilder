@@ -58,6 +58,25 @@ pub struct OpRbuilderArgs {
     )]
     pub resource_metering_buffer_size: usize,
 
+    /// Buffer size for backrun bundles (LRU eviction when full)
+    #[arg(long = "builder.backrun-bundle-buffer-size", default_value = "10000")]
+    pub backrun_bundle_buffer_size: usize,
+
+    /// Path to Kafka properties file for audit events (enables Kafka audit if set)
+    #[arg(
+        long = "builder.audit-kafka-properties",
+        env = "AUDIT_KAFKA_PROPERTIES_FILE"
+    )]
+    pub audit_kafka_properties: Option<String>,
+
+    /// Kafka topic for audit events
+    #[arg(
+        long = "builder.audit-kafka-topic",
+        env = "AUDIT_KAFKA_TOPIC",
+        default_value = "tips-audit"
+    )]
+    pub audit_kafka_topic: String,
+
     /// Path to builder playgorund to automatically start up the node connected to it
     #[arg(
         long = "builder.playground",
