@@ -1,0 +1,7 @@
+# Kafka configuration properties for backrun bundle audit events
+# Use localhost when running op-rbuilder on host (not in Docker)
+# Use host.docker.internal when running op-rbuilder inside Docker
+
+bootstrap.servers=localhost:9092
+message.timeout.ms=5000
+

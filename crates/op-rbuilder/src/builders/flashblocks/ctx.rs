@@ -1,6 +1,6 @@
 use crate::{
     builders::{BuilderConfig, OpPayloadBuilderCtx, flashblocks::FlashblocksConfig},
-    bundles::BackrunBundleStore,
+    bundles::{AuditSender, BackrunBundleStore},
     gas_limiter::{AddressGasLimiter, args::GasLimiterArgs},
     metrics::OpRBuilderMetrics,
     resource_metering::ResourceMetering,
@@ -35,6 +35,8 @@ pub(super) struct OpPayloadSyncerCtx {
     resource_metering: ResourceMetering,
     /// Backrun bundle store
     backrun_bundle_store: BackrunBundleStore,
+    /// Audit event channel
+    audit_tx: Option<AuditSender>,
 }
 
 impl OpPayloadSyncerCtx {
@@ -48,6 +50,7 @@ impl OpPayloadSyncerCtx {
         Client: ClientBounds,
     {
         let chain_spec = client.chain_spec();
+        let audit_tx = builder_config.backrun_bundle_store.audit_tx();
         Ok(Self {
             evm_config,
             da_config: builder_config.da_config.clone(),
@@ -56,6 +59,7 @@ impl OpPayloadSyncerCtx {
             metrics,
             resource_metering: builder_config.resource_metering,
             backrun_bundle_store: builder_config.backrun_bundle_store,
+            audit_tx,
         })
     }
 
@@ -90,6 +94,7 @@ impl OpPayloadSyncerCtx {
             address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
             resource_metering: self.resource_metering.clone(),
             backrun_bundle_store: self.backrun_bundle_store.clone(),
+            audit_tx: self.audit_tx,
         }
     }
 }

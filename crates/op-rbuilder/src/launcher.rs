@@ -1,10 +1,17 @@
 use eyre::Result;
+use rdkafka::ClientConfig;
+use rdkafka::producer::FutureProducer;
 use reth_optimism_rpc::OpEthApiBuilder;
+use tips_audit::{
+    BundleEvent, KafkaBundleEventPublisher, LoggingBundleEventPublisher, connect_audit_to_publisher,
+};
+use tips_core::kafka::load_kafka_config_from_file;
+use tokio::sync::mpsc;
 
 use crate::{
     args::*,
     builders::{BuilderConfig, BuilderMode, FlashblocksBuilder, PayloadBuilder, StandardBuilder},
-    bundles::{BaseBundlesApiExtServer, BundlesApiExt},
+    bundles::{BackrunBundleStore, BaseBundlesApiExtServer, BundlesApiExt},
     metrics::{VERSION, record_flag_gauge_metrics},
     monitor_tx_pool::monitor_tx_pool,
     primitives::reth::engine_api_builder::OpEngineApiBuilder,
@@ -101,8 +108,40 @@ where
         builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, OpChainSpec>>,
         builder_args: OpRbuilderArgs,
     ) -> Result<()> {
-        let builder_config = BuilderConfig::<B::Config>::try_from(builder_args.clone())
+        // Set up audit event channel
+        let (audit_tx, audit_rx) = mpsc::unbounded_channel::<BundleEvent>();
+
+        // Use Kafka publisher if config provided, otherwise use logging publisher
+        if let Some(ref kafka_properties_file) = builder_args.audit_kafka_properties {
+            let kafka_config = load_kafka_config_from_file(kafka_properties_file)
+                .expect("Failed to load Kafka config from properties file");
+            let audit_client_config = ClientConfig::from_iter(kafka_config);
+            let audit_producer: FutureProducer = audit_client_config
+                .create()
+                .expect("Failed to create Kafka producer");
+            let audit_publisher = KafkaBundleEventPublisher::new(
+                audit_producer,
+                builder_args.audit_kafka_topic.clone(),
+            );
+            connect_audit_to_publisher(audit_rx, audit_publisher);
+            tracing::info!(
+                topic = %builder_args.audit_kafka_topic,
+                "Backrun bundle audit events enabled (Kafka)"
+            );
+        } else {
+            connect_audit_to_publisher(audit_rx, LoggingBundleEventPublisher::new());
+            tracing::warn!("Backrun bundle audit events enabled (logging only)");
+        }
+
+        // Create backrun bundle store with audit channel
+        let backrun_bundle_store =
+            BackrunBundleStore::with_audit(builder_args.backrun_bundle_buffer_size, audit_tx);
+
+        let mut builder_config = BuilderConfig::<B::Config>::try_from(builder_args.clone())
             .expect("Failed to convert rollup args to builder config");
+
+        // Replace the default backrun bundle store with the one that has audit
+        builder_config.backrun_bundle_store = backrun_bundle_store.clone();
 
         record_flag_gauge_metrics(&builder_args);
 
@@ -113,7 +152,6 @@ where
         let reverted_cache = Cache::builder().max_capacity(100).build();
         let reverted_cache_copy = reverted_cache.clone();
         let resource_metering = builder_config.resource_metering.clone();
-        let backrun_bundle_store = builder_config.backrun_bundle_store.clone();
 
         let mut addons: OpAddOns<
             _,

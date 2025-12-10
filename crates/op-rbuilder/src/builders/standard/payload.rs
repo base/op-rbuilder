@@ -253,6 +253,7 @@ where
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
             backrun_bundle_store: self.config.backrun_bundle_store.clone(),
+            audit_tx: self.config.backrun_bundle_store.audit_tx(),
         };
 
         let builder = OpBuilder::new(best);

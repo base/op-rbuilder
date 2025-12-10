@@ -7,21 +7,37 @@ use jsonrpsee::{
 };
 use op_alloy_consensus::OpTxEnvelope;
 use std::{fmt::Debug, sync::Arc};
+use tips_audit::BundleEvent;
 use tips_core::{Bundle, types::ParsedBundle};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::metrics::OpRBuilderMetrics;
 
+/// Type alias for the audit event sender
+pub(crate) type AuditSender = mpsc::UnboundedSender<BundleEvent>;
+
+/// Stored backrun bundle with its bundle_id and transactions
+#[derive(Clone)]
+pub struct StoredBackrunBundle {
+    pub bundle_id: Uuid,
+    pub backrun_txs: Vec<Recovered<OpTxEnvelope>>,
+}
+
 struct BackrunData {
-    /// Key is the hash of the target tx, value is list of backrun raw txs
-    by_target_tx: dashmap::DashMap<TxHash, Vec<Vec<Recovered<OpTxEnvelope>>>>,
+    /// Key is the hash of the target tx, value is list of backrun bundles with their IDs
+    by_target_tx: dashmap::DashMap<TxHash, Vec<StoredBackrunBundle>>,
     lru: ConcurrentQueue<TxHash>,
+    /// Map tx hash to bundle ID for audit tracking
+    tx_bundle_ids: dashmap::DashMap<TxHash, Uuid>,
 }
 
 #[derive(Clone)]
 pub struct BackrunBundleStore {
     data: Arc<BackrunData>,
     metrics: OpRBuilderMetrics,
+    audit_tx: Option<AuditSender>,
 }
 
 impl Debug for BackrunBundleStore {
@@ -38,12 +54,42 @@ impl BackrunBundleStore {
             data: Arc::new(BackrunData {
                 by_target_tx: dashmap::DashMap::new(),
                 lru: ConcurrentQueue::bounded(buffer_size),
+                tx_bundle_ids: dashmap::DashMap::new(),
             }),
             metrics: OpRBuilderMetrics::default(),
+            audit_tx: None,
         }
     }
 
-    pub fn insert(&self, bundle: ParsedBundle) -> Result<(), String> {
+    /// Create a new BackrunBundleStore with an audit channel
+    pub fn with_audit(buffer_size: usize, audit_tx: AuditSender) -> Self {
+        Self {
+            data: Arc::new(BackrunData {
+                by_target_tx: dashmap::DashMap::new(),
+                lru: ConcurrentQueue::bounded(buffer_size),
+                tx_bundle_ids: dashmap::DashMap::new(),
+            }),
+            metrics: OpRBuilderMetrics::default(),
+            audit_tx: Some(audit_tx),
+        }
+    }
+
+    /// Get the audit sender (for passing to context)
+    pub fn audit_tx(&self) -> Option<AuditSender> {
+        self.audit_tx.clone()
+    }
+
+    /// Register a tx hash to bundle ID mapping for audit tracking
+    pub fn set_tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) {
+        self.data.tx_bundle_ids.insert(tx_hash, bundle_id);
+    }
+
+    /// Look up the bundle ID for a tx hash
+    pub fn get_tx_bundle_id(&self, tx_hash: &TxHash) -> Option<Uuid> {
+        self.data.tx_bundle_ids.get(tx_hash).map(|entry| *entry)
+    }
+
+    pub fn insert(&self, bundle: ParsedBundle, bundle_id: Uuid) -> Result<(), String> {
         if bundle.txs.len() < 2 {
             return Err("Bundle must have at least 2 transactions (target + backrun)".to_string());
         }
@@ -66,15 +112,21 @@ impl BackrunBundleStore {
 
         let _ = self.data.lru.push(target_tx_hash);
 
+        let stored_bundle = StoredBackrunBundle {
+            bundle_id,
+            backrun_txs: backrun_txs.clone(),
+        };
+
         self.data
             .by_target_tx
             .entry(target_tx_hash)
             .or_insert_with(Vec::new)
-            .push(backrun_txs.clone());
+            .push(stored_bundle);
 
         info!(
             target: "backrun_bundles",
             target_tx = ?target_tx_hash,
+            bundle_id = %bundle_id,
             backrun_tx_count = backrun_txs.len(),
             "Stored backrun bundle"
         );
@@ -83,10 +135,27 @@ impl BackrunBundleStore {
             .backrun_bundles_in_store
             .set(self.data.by_target_tx.len() as f64);
 
+        // Emit audit event for backrun bundle inserted into store
+        if let Some(ref audit_tx) = self.audit_tx {
+            let event = BundleEvent::BackrunInserted {
+                bundle_id,
+                target_tx_hash,
+                backrun_tx_hashes: backrun_txs.iter().map(|tx| tx.tx_hash()).collect(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            };
+            if let Err(e) = audit_tx.send(event) {
+                warn!(
+                    target: "backrun_bundles",
+                    error = %e,
+                    "Failed to send BackrunInserted audit event"
+                );
+            }
+        }
+
         Ok(())
     }
 
-    pub fn get(&self, target_tx_hash: &TxHash) -> Option<Vec<Vec<Recovered<OpTxEnvelope>>>> {
+    pub fn get(&self, target_tx_hash: &TxHash) -> Option<Vec<StoredBackrunBundle>> {
         self.data
             .by_target_tx
             .get(target_tx_hash)
@@ -123,7 +192,11 @@ impl Default for BackrunBundleStore {
 #[cfg_attr(test, rpc(server, client, namespace = "base"))]
 pub trait BaseBundlesApiExt {
     #[method(name = "sendBackrunBundle")]
-    async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()>;
+    async fn send_backrun_bundle(&self, bundle: Bundle, bundle_id: Uuid) -> RpcResult<()>;
+
+    /// Register a tx hash to bundle ID mapping for audit tracking
+    #[method(name = "txBundleId")]
+    async fn tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) -> RpcResult<()>;
 }
 
 pub(crate) struct BundlesApiExt {
@@ -142,10 +215,14 @@ impl BundlesApiExt {
 
 #[async_trait]
 impl BaseBundlesApiExtServer for BundlesApiExt {
-    async fn send_backrun_bundle(&self, bundle: Bundle) -> RpcResult<()> {
+    async fn send_backrun_bundle(&self, bundle: Bundle, bundle_id: Uuid) -> RpcResult<()> {
         self.metrics.backrun_bundles_received_total.increment(1);
 
-        info!(message = "Received backrun bundle", tx_hashes = ?bundle.reverting_tx_hashes);
+        info!(
+            message = "Received backrun bundle",
+            bundle_id = %bundle_id,
+            tx_hashes = ?bundle.reverting_tx_hashes
+        );
 
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
@@ -156,15 +233,28 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
             )
         })?;
 
-        self.bundle_store.insert(parsed_bundle).map_err(|e| {
-            warn!(target: "backrun_bundles", error = %e, "Failed to store bundle");
-            jsonrpsee::types::ErrorObject::owned(
-                jsonrpsee::types::error::INTERNAL_ERROR_CODE,
-                format!("Failed to store bundle: {}", e),
-                None::<()>,
-            )
-        })?;
+        self.bundle_store
+            .insert(parsed_bundle, bundle_id)
+            .map_err(|e| {
+                warn!(target: "backrun_bundles", error = %e, "Failed to store bundle");
+                jsonrpsee::types::ErrorObject::owned(
+                    jsonrpsee::types::error::INTERNAL_ERROR_CODE,
+                    format!("Failed to store bundle: {}", e),
+                    None::<()>,
+                )
+            })?;
 
+        Ok(())
+    }
+
+    async fn tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) -> RpcResult<()> {
+        info!(
+            target: "backrun_bundles",
+            tx_hash = ?tx_hash,
+            bundle_id = %bundle_id,
+            "Registered tx bundle ID"
+        );
+        self.bundle_store.set_tx_bundle_id(tx_hash, bundle_id);
         Ok(())
     }
 }
@@ -221,7 +311,7 @@ mod tests {
 
         // Test insert fails with only 1 tx (need target + at least 1 backrun)
         let single_tx_bundle = create_test_parsed_bundle(vec![target_tx.encoded_2718().into()]);
-        assert!(store.insert(single_tx_bundle).is_err());
+        assert!(store.insert(single_tx_bundle, Uuid::new_v4()).is_err());
         assert_eq!(store.len(), 0);
 
         // Test insert succeeds with 2+ txs
@@ -229,21 +319,21 @@ mod tests {
             target_tx.encoded_2718().into(),
             backrun_tx1.encoded_2718().into(),
         ]);
-        assert!(store.insert(valid_bundle).is_ok());
+        assert!(store.insert(valid_bundle, Uuid::new_v4()).is_ok());
         assert_eq!(store.len(), 1);
 
         // Test get returns the backrun txs (not the target)
         let retrieved = store.get(&target_tx_hash).unwrap();
         assert_eq!(retrieved.len(), 1); // 1 bundle
-        assert_eq!(retrieved[0].len(), 1); // 1 backrun tx in that bundle
-        assert_eq!(retrieved[0][0].tx_hash(), backrun_tx1.tx_hash());
+        assert_eq!(retrieved[0].backrun_txs.len(), 1); // 1 backrun tx in that bundle
+        assert_eq!(retrieved[0].backrun_txs[0].tx_hash(), backrun_tx1.tx_hash());
 
         // Test multiple backrun bundles for same target
         let second_bundle = create_test_parsed_bundle(vec![
             target_tx.encoded_2718().into(),
             backrun_tx2.encoded_2718().into(),
         ]);
-        assert!(store.insert(second_bundle).is_ok());
+        assert!(store.insert(second_bundle, Uuid::new_v4()).is_ok());
         assert_eq!(store.len(), 1); // Still 1 target, but 2 backrun bundles
 
         let retrieved = store.get(&target_tx_hash).unwrap();
@@ -274,7 +364,7 @@ mod tests {
                 target.encoded_2718().into(),
                 backrun.encoded_2718().into(),
             ]);
-            let _ = store.insert(bundle);
+            let _ = store.insert(bundle, Uuid::new_v4());
         }
 
         // Only 2 should remain due to LRU eviction
