@@ -3,7 +3,7 @@ use rdkafka::ClientConfig;
 use rdkafka::producer::FutureProducer;
 use reth_optimism_rpc::OpEthApiBuilder;
 use tips_audit::{
-    BundleEvent, KafkaBundleEventPublisher, LoggingBundleEventPublisher, connect_audit_to_publisher,
+    BundleEvent, KafkaBundleEventPublisher, connect_audit_to_publisher,
 };
 use tips_core::kafka::load_kafka_config_from_file;
 use tokio::sync::mpsc;
@@ -108,10 +108,8 @@ where
         builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, OpChainSpec>>,
         builder_args: OpRbuilderArgs,
     ) -> Result<()> {
-        // Set up audit event channel
         let (audit_tx, audit_rx) = mpsc::unbounded_channel::<BundleEvent>();
 
-        // Use Kafka publisher if config provided, otherwise use logging publisher
         if let Some(ref kafka_properties_file) = builder_args.audit_kafka_properties {
             let kafka_config = load_kafka_config_from_file(kafka_properties_file)
                 .expect("Failed to load Kafka config from properties file");
@@ -128,12 +126,8 @@ where
                 topic = %builder_args.audit_kafka_topic,
                 "Backrun bundle audit events enabled (Kafka)"
             );
-        } else {
-            connect_audit_to_publisher(audit_rx, LoggingBundleEventPublisher::new());
-            tracing::warn!("Backrun bundle audit events enabled (logging only)");
         }
 
-        // Create backrun bundle store with audit channel
         let backrun_bundle_store =
             BackrunBundleStore::with_audit(builder_args.backrun_bundle_buffer_size, audit_tx);
 

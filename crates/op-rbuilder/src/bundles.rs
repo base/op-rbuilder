@@ -10,15 +10,13 @@ use std::{fmt::Debug, sync::Arc};
 use tips_audit::BundleEvent;
 use tips_core::{Bundle, types::ParsedBundle};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::metrics::OpRBuilderMetrics;
 
-/// Type alias for the audit event sender
 pub(crate) type AuditSender = mpsc::UnboundedSender<BundleEvent>;
 
-/// Stored backrun bundle with its bundle_id and transactions
 #[derive(Clone)]
 pub struct StoredBackrunBundle {
     pub bundle_id: Uuid,
@@ -26,10 +24,8 @@ pub struct StoredBackrunBundle {
 }
 
 struct BackrunData {
-    /// Key is the hash of the target tx, value is list of backrun bundles with their IDs
     by_target_tx: dashmap::DashMap<TxHash, Vec<StoredBackrunBundle>>,
     lru: ConcurrentQueue<TxHash>,
-    /// Map tx hash to bundle ID for audit tracking
     tx_bundle_ids: dashmap::DashMap<TxHash, Uuid>,
 }
 
@@ -61,7 +57,6 @@ impl BackrunBundleStore {
         }
     }
 
-    /// Create a new BackrunBundleStore with an audit channel
     pub fn with_audit(buffer_size: usize, audit_tx: AuditSender) -> Self {
         Self {
             data: Arc::new(BackrunData {
@@ -74,17 +69,14 @@ impl BackrunBundleStore {
         }
     }
 
-    /// Get the audit sender (for passing to context)
     pub fn audit_tx(&self) -> Option<AuditSender> {
         self.audit_tx.clone()
     }
 
-    /// Register a tx hash to bundle ID mapping for audit tracking
     pub fn set_tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) {
         self.data.tx_bundle_ids.insert(tx_hash, bundle_id);
     }
 
-    /// Look up the bundle ID for a tx hash
     pub fn get_tx_bundle_id(&self, tx_hash: &TxHash) -> Option<Uuid> {
         self.data.tx_bundle_ids.get(tx_hash).map(|entry| *entry)
     }
@@ -98,7 +90,6 @@ impl BackrunBundleStore {
         let target_tx_hash = bundle.txs[0].tx_hash();
         let backrun_txs: Vec<Recovered<OpTxEnvelope>> = bundle.txs[1..].to_vec();
 
-        // Handle LRU eviction
         if self.data.lru.is_full()
             && let Ok(evicted_hash) = self.data.lru.pop()
         {
@@ -123,19 +114,10 @@ impl BackrunBundleStore {
             .or_insert_with(Vec::new)
             .push(stored_bundle);
 
-        info!(
-            target: "backrun_bundles",
-            target_tx = ?target_tx_hash,
-            bundle_id = %bundle_id,
-            backrun_tx_count = backrun_txs.len(),
-            "Stored backrun bundle"
-        );
-
         self.metrics
             .backrun_bundles_in_store
             .set(self.data.by_target_tx.len() as f64);
 
-        // Emit audit event for backrun bundle inserted into store
         if let Some(ref audit_tx) = self.audit_tx {
             let event = BundleEvent::BackrunInserted {
                 bundle_id,
@@ -194,7 +176,6 @@ pub trait BaseBundlesApiExt {
     #[method(name = "sendBackrunBundle")]
     async fn send_backrun_bundle(&self, bundle: Bundle, bundle_id: Uuid) -> RpcResult<()>;
 
-    /// Register a tx hash to bundle ID mapping for audit tracking
     #[method(name = "txBundleId")]
     async fn tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) -> RpcResult<()>;
 }
@@ -218,17 +199,11 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
     async fn send_backrun_bundle(&self, bundle: Bundle, bundle_id: Uuid) -> RpcResult<()> {
         self.metrics.backrun_bundles_received_total.increment(1);
 
-        info!(
-            message = "Received backrun bundle",
-            bundle_id = %bundle_id,
-            tx_hashes = ?bundle.reverting_tx_hashes
-        );
-
         let parsed_bundle = ParsedBundle::try_from(bundle).map_err(|e| {
             warn!(target: "backrun_bundles", error = %e, "Failed to parse bundle");
             jsonrpsee::types::ErrorObject::owned(
                 jsonrpsee::types::error::INVALID_PARAMS_CODE,
-                format!("Failed to parse bundle: {}", e),
+                format!("Failed to parse bundle: {e}"),
                 None::<()>,
             )
         })?;
@@ -239,7 +214,7 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
                 warn!(target: "backrun_bundles", error = %e, "Failed to store bundle");
                 jsonrpsee::types::ErrorObject::owned(
                     jsonrpsee::types::error::INTERNAL_ERROR_CODE,
-                    format!("Failed to store bundle: {}", e),
+                    format!("Failed to store bundle: {e}"),
                     None::<()>,
                 )
             })?;
@@ -248,12 +223,6 @@ impl BaseBundlesApiExtServer for BundlesApiExt {
     }
 
     async fn tx_bundle_id(&self, tx_hash: TxHash, bundle_id: Uuid) -> RpcResult<()> {
-        info!(
-            target: "backrun_bundles",
-            tx_hash = ?tx_hash,
-            bundle_id = %bundle_id,
-            "Registered tx bundle ID"
-        );
         self.bundle_store.set_tx_bundle_id(tx_hash, bundle_id);
         Ok(())
     }

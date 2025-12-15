@@ -14123,7 +14123,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "tips-audit"
 version = "0.1.0"
-source = "git+https://github.com/base/tips?rev=d571797179fd0cc9e932373ba9a4eb5c2be0c0c9#d571797179fd0cc9e932373ba9a4eb5c2be0c0c9"
+source = "git+https://github.com/base/tips?rev=2f0a86bcde3e33c401d9fe5454b26b0478f2484c#2f0a86bcde3e33c401d9fe5454b26b0478f2484c"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives 1.4.1",
@@ -14150,7 +14150,7 @@ dependencies = [
 [[package]]
 name = "tips-core"
 version = "0.1.0"
-source = "git+https://github.com/base/tips?rev=d571797179fd0cc9e932373ba9a4eb5c2be0c0c9#d571797179fd0cc9e932373ba9a4eb5c2be0c0c9"
+source = "git+https://github.com/base/tips?rev=2f0a86bcde3e33c401d9fe5454b26b0478f2484c#2f0a86bcde3e33c401d9fe5454b26b0478f2484c"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives 1.4.1",

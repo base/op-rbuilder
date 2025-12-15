@@ -452,7 +452,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 is_bundle_tx && !reverted_hashes.unwrap().contains(&tx_hash);
 
             let log_txn = |result: TxnExecutionResult| {
-                info!(
+                debug!(
                     target: "payload_builder",
                     message = "Considering transaction",
                     tx_hash = ?tx_hash,
@@ -467,7 +467,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             // Look up bundle_id for this tx (registered via base_txBundleId RPC)
             let bundle_id = self.backrun_bundle_store.get_tx_bundle_id(&tx_hash);
 
-            // Emit StartExecuting audit event - tx is about to be executed
             self.send_audit_event(BundleEvent::StartExecuting {
                 bundle_id,
                 tx_hash,
@@ -633,7 +632,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
 
-            // Emit Executed audit event - tx successfully executed and committed
             self.send_audit_event(BundleEvent::Executed {
                 bundle_id,
                 tx_hash,
@@ -642,7 +640,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
             });
 
-            // Execute backrun bundles for this transaction if it succeeded
             if is_success && let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
                 self.metrics.backrun_target_txs_found_total.increment(1);
 
@@ -660,9 +657,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                         let is_backrun_success = result.is_success();
 
                         if !is_backrun_success {
-                            info!(message = "Backrun transaction reverted", tx_hash = ?backrun_tx.tx_hash(), bundle_id = %bundle_id);
-
-                            // Emit BackrunBundleExecuted audit event for reverted tx
                             self.send_audit_event(BundleEvent::BackrunBundleExecuted {
                                 bundle_id,
                                 target_tx_hash: tx_hash,
@@ -676,8 +670,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                             continue;
                         }
 
-                        info!(message = "Backrun transaction succeeded", tx_hash = ?backrun_tx.tx_hash(), bundle_id = %bundle_id);
-
                         info.cumulative_gas_used += backrun_gas_used;
                         info.cumulative_da_bytes_used += backrun_tx.encoded_2718().len() as u64;
 
@@ -690,10 +682,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                         };
                         info.receipts.push(self.build_receipt(ctx, None));
 
-                        // commit changes
                         evm.db_mut().commit(state);
 
-                        // Emit BackrunBundleExecuted audit event for successful tx
                         self.send_audit_event(BundleEvent::BackrunBundleExecuted {
                             bundle_id,
                             target_tx_hash: tx_hash,
@@ -704,13 +694,11 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                             timestamp_ms: chrono::Utc::now().timestamp_millis(),
                         });
 
-                        // update add to total fees
                         let miner_fee = backrun_tx
                             .effective_tip_per_gas(base_fee)
                             .expect("fee is always valid; execution succeeded");
                         info.total_fees += U256::from(miner_fee) * U256::from(backrun_gas_used);
 
-                        // append sender and transaction to the respective lists
                         info.executed_senders.push(backrun_tx.signer());
                         info.executed_transactions.push(backrun_tx.into_inner());
                     }
