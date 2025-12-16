@@ -75,6 +75,39 @@ pub struct OpRbuilderArgs {
     pub flashtestations: FlashtestationsArgs,
     #[command(flatten)]
     pub gas_limiter: GasLimiterArgs,
+
+    /// Account Abstraction (AA) Native Bundler Configuration
+    /// Enable AA native bundler in block builder
+    #[arg(
+        long = "builder.enable-aa-bundler",
+        default_value = "false",
+        env = "ENABLE_AA_BUNDLER"
+    )]
+    pub enable_aa_bundler: bool,
+
+    /// Secret key for AA bundle transactions  
+    #[arg(long = "aa.bundler-signer-key", env = "AA_BUNDLER_SIGNER_KEY")]
+    pub aa_bundler_signer: Option<Signer>,
+
+    /// Percentage of block gas to reserve for AA bundles after threshold
+    #[arg(
+        long = "aa.gas-reserve-percentage",
+        default_value = "20",
+        env = "AA_GAS_RESERVE_PERCENTAGE"
+    )]
+    pub aa_gas_reserve_percentage: u8,
+
+    /// Threshold percentage of block gas before starting AA bundle reservation
+    #[arg(
+        long = "aa.gas-threshold",
+        default_value = "80",
+        env = "AA_GAS_THRESHOLD"
+    )]
+    pub aa_gas_threshold: u8,
+
+    /// UserOperation pool URL (if not provided, AA bundling is disabled)
+    #[arg(long = "aa.pool-url", env = "AA_POOL_URL")]
+    pub aa_pool_url: Option<String>,
 }
 
 impl Default for OpRbuilderArgs {
