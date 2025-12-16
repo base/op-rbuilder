@@ -1,8 +1,8 @@
 use alloy_consensus::{Eip658Value, Transaction, conditional::BlockConditionalAttributes};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::Database;
-use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_primitives::{BlockHash, Bytes, U256};
+use alloy_op_evm::{OpEvmFactory, block::receipt_builder::OpReceiptBuilder};
+use alloy_primitives::{Address, B256, BlockHash, Bytes, U256};
 use alloy_rpc_types_eth::Withdrawals;
 use core::fmt::Debug;
 use op_alloy_consensus::OpDepositReceipt;
@@ -16,14 +16,14 @@ use reth_evm::{
 };
 use reth_node_api::PayloadBuilderError;
 use reth_optimism_chainspec::OpChainSpec;
-use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
+use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes, OpRethReceiptBuilder};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_optimism_payload_builder::{
     config::{OpDAConfig, OpGasLimitConfig},
     error::OpPayloadBuilderError,
 };
-use reth_optimism_primitives::{OpReceipt, OpTransactionSigned};
+use reth_optimism_primitives::{OpPrimitives, OpReceipt, OpTransactionSigned};
 use reth_optimism_txpool::{
     conditional::MaybeConditionalTransaction,
     estimated_da_size::DataAvailabilitySized,
@@ -34,12 +34,19 @@ use reth_primitives::SealedHeader;
 use reth_primitives_traits::{InMemorySize, SignedTransaction};
 use reth_revm::{State, context::Block};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
-use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
-use std::{sync::Arc, time::Instant};
+use revm::{
+    DatabaseCommit, DatabaseRef,
+    context::result::{EVMError, ResultAndState},
+    interpreter::as_u64_saturated,
+    primitives::{StorageKey, StorageValue},
+    state::{AccountInfo, Bytecode},
+};
+use std::{convert::Infallible, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{Span, debug, info, trace, warn};
 
 use crate::{
+    block_stm::{db_adapter::VersionedDbError, evm::OpLazyEvmFactory, executor::Executor},
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -50,10 +57,10 @@ use crate::{
 };
 
 /// Container type that holds all necessities to build a new payload.
-#[derive(Debug)]
-pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
+#[derive(Debug, Clone)]
+pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = (), EvmFactory = OpEvmFactory> {
     /// The type that knows how to perform system calls and configure the evm.
-    pub evm_config: OpEvmConfig,
+    pub evm_config: OpEvmConfig<OpChainSpec, OpPrimitives, OpRethReceiptBuilder, EvmFactory>,
     /// The DA config for the payload builder
     pub da_config: OpDAConfig,
     // Gas limit configuration for the payload builder
@@ -80,9 +87,11 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Unified transaction data store (backrun bundles + resource metering)
     pub tx_data_store: TxDataStore,
+    /// Number of parallel threads for transaction execution.
+    pub parallel_threads: usize,
 }
 
-impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
+impl<ExtraCtx: Debug + Default, EF> OpPayloadBuilderCtx<ExtraCtx, EF> {
     pub(super) fn with_cancel(self, cancel: CancellationToken) -> Self {
         Self { cancel, ..self }
     }
@@ -246,7 +255,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
     }
 }
 
-impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
+impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
     /// Constructs a receipt for the given transaction.
     pub fn build_receipt<E: Evm>(
         &self,
@@ -378,7 +387,8 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         Ok(info)
     }
 
-    /// Executes the given best transactions and updates the execution info.
+    /// Executes the given best transactions sequentially and updates the execution info.
+    /// Used when `parallel_threads == 1`.
     ///
     /// Returns `Ok(Some(())` if the job was cancelled.
     pub(super) fn execute_best_transactions<E: Debug + Default>(
@@ -390,6 +400,16 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         block_da_limit: Option<u64>,
         block_da_footprint_limit: Option<u64>,
     ) -> Result<Option<()>, PayloadBuilderError> {
+        // Capture parent span (build_flashblock) for proper linking
+        let parent_span = Span::current();
+        let _execute_span = tracing::info_span!(
+            parent: &parent_span,
+            "execute_txs",
+            num_threads = 1,
+            block_gas_limit = block_gas_limit
+        )
+        .entered();
+
         let execute_txs_start_time = Instant::now();
         let mut num_txs_considered = 0;
         let mut num_txs_simulated = 0;
@@ -398,6 +418,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         let mut num_bundles_reverted = 0;
         let mut reverted_gas_used = 0;
         let base_fee = self.base_fee();
+        let mut txn_idx: u32 = 0;
 
         let tx_da_limit = self.da_config.max_da_tx_size();
         let mut evm = self.evm_config.evm_with_env(&mut *db, self.evm_env.clone());
@@ -416,6 +437,10 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
         };
 
         while let Some(tx) = best_txs.next(()) {
+            let _tx_span =
+                tracing::info_span!("sequential_tx_execute", txn_idx = txn_idx).entered();
+            txn_idx += 1;
+
             let interop = tx.interop_deadline();
             let reverted_hashes = tx.reverted_hashes().clone();
             let conditional = tx.conditional().cloned();
@@ -592,6 +617,16 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             };
             info.receipts.push(self.build_receipt(ctx, None));
 
+            // Log state before commit (sequential mode)
+            trace!(
+                target: "payload_builder",
+                mode = "sequential",
+                txn_idx,
+                num_accounts = state.len(),
+                has_storage_count = state.iter().filter(|(_, a)| !a.storage.is_empty()).count(),
+                "SEQUENTIAL: Before commit"
+            );
+
             // commit changes
             evm.db_mut().commit(state);
 
@@ -755,6 +790,527 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             txs_rejected = num_txs_simulated_fail,
             bundles_reverted = num_bundles_reverted,
         );
+        Ok(None)
+    }
+}
+
+#[derive(Debug)]
+struct MockDB;
+
+impl revm::Database for MockDB {
+    type Error = Infallible;
+
+    /// Gets basic account information.
+    fn basic(&mut self, _address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        unreachable!()
+    }
+
+    /// Gets account code by its hash.
+    fn code_by_hash(&mut self, _code_hash: B256) -> Result<Bytecode, Self::Error> {
+        unreachable!()
+    }
+
+    /// Gets storage value of address at index.
+    fn storage(
+        &mut self,
+        _address: Address,
+        _index: StorageKey,
+    ) -> Result<StorageValue, Self::Error> {
+        unreachable!()
+    }
+
+    /// Gets block hash by block number.
+    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
+        unreachable!()
+    }
+}
+
+impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
+    /// Constructs a receipt for the given transaction.
+    pub fn build_receipt_parallel<E: Evm>(
+        &self,
+        ctx: ReceiptBuilderCtx<'_, OpTransactionSigned, E>,
+        deposit_nonce: Option<u64>,
+    ) -> OpReceipt {
+        let receipt_builder = self.evm_config.block_executor_factory().receipt_builder();
+        match receipt_builder.build_receipt(ctx) {
+            Ok(receipt) => receipt,
+            Err(ctx) => {
+                let receipt = alloy_consensus::Receipt {
+                    // Success flag was added in `EIP-658: Embedding transaction status code
+                    // in receipts`.
+                    status: Eip658Value::Eip658(ctx.result.is_success()),
+                    cumulative_gas_used: ctx.cumulative_gas_used,
+                    logs: ctx.result.into_logs(),
+                };
+
+                receipt_builder.build_deposit_receipt(OpDepositReceipt {
+                    inner: receipt,
+                    deposit_nonce,
+                    // The deposit receipt version was introduced in Canyon to indicate an
+                    // update to how receipt hashes should be computed
+                    // when set. The state transition process ensures
+                    // this is only set for post-Canyon deposit
+                    // transactions.
+                    deposit_receipt_version: self.is_canyon_active().then_some(1),
+                })
+            }
+        }
+    }
+
+    /// Executes the given best transactions in parallel using Block-STM.
+    ///
+    /// This implementation uses Block-STM for true parallel execution:
+    /// - Each transaction gets its own `State<VersionedDatabaseRef>`
+    /// - Reads route through MVHashMap to see earlier transactions' writes
+    /// - Conflicts are detected via read/write set tracking
+    /// - Commits happen in transaction order
+    ///
+    /// Returns `Ok(Some(())` if the job was cancelled.
+    pub(super) fn execute_best_transactions_parallel<E, DB>(
+        &self,
+        info: &mut ExecutionInfo<E>,
+        db: &mut State<DB>,
+        best_txs: &mut (impl PayloadTxsBounds + Send),
+        block_gas_limit: u64,
+        block_da_limit: Option<u64>,
+        _block_da_footprint_limit: Option<u64>,
+    ) -> Result<Option<()>, PayloadBuilderError>
+    where
+        ExtraCtx: Sync,
+        E: Debug + Default + Send,
+        DB: Database + DatabaseRef + Send + Sync,
+    {
+        let num_threads = self.parallel_threads;
+        let tx_da_limit = self.da_config.max_da_tx_size();
+        let block_attr = BlockConditionalAttributes {
+            number: self.block_number(),
+
+            timestamp: self.attributes().timestamp(),
+        };
+
+        // Collect candidate transactions from the iterator.
+
+        // Also extract reverted_hashes for bundle revert protection before losing the wrapper type
+
+        let mut candidate_txs = Vec::new();
+
+        let mut tx_reverted_hashes = Vec::new();
+
+        while let Some(tx) = best_txs.next(()) {
+            // Check block conditional attributes
+
+            if let Some(conditional) = tx.conditional()
+                && !conditional.matches_block_attributes(&block_attr)
+            {
+                best_txs.mark_invalid(tx.sender(), tx.nonce());
+
+                continue;
+            }
+            let reverted_hashes = tx.reverted_hashes();
+            tx_reverted_hashes.push(reverted_hashes);
+            candidate_txs.push(tx);
+        }
+
+        let num_candidates = candidate_txs.len();
+        if num_candidates == 0 {
+            return Ok(None);
+        }
+
+        // Capture parent span for cross-thread propagation (links to build_flashblock)
+        let parent_span = Span::current();
+        let _execute_span = tracing::info_span!(
+            parent: &parent_span,
+            "execute_txs",
+            num_txns = num_candidates,
+            num_threads = num_threads
+        )
+        .entered();
+
+        info!(
+            target: "payload_builder",
+            message = "Executing best transactions (Block-STM)",
+            block_da_limit = ?block_da_limit,
+            tx_da_limit = ?tx_da_limit,
+            block_gas_limit = ?block_gas_limit,
+            num_threads = num_threads,
+            num_candidates = num_candidates,
+        );
+
+        // Capture variables for closure
+        let max_gas_per_txn = self.max_gas_per_txn;
+        let address_gas_limiter = self.address_gas_limiter.clone();
+        let da_footprint_gas_scalar = info.da_footprint_scalar;
+        let block_da_footprint_limit = _block_da_footprint_limit;
+        let base_cumulative_gas = info.cumulative_gas_used;
+        let base_cumulative_da_bytes = info.cumulative_da_bytes_used;
+
+        // Capture current span for cross-thread propagation (execute_txs span)
+        let execute_txs_span = Span::current();
+        let (results, shared_code_cache) = {
+            let mut executor = Executor::new(num_threads, candidate_txs, &mut *db);
+
+            // Spawn worker threads using Block-STM scheduler
+            executor.execute_transactions_parallel(
+                self.base_fee(),
+                self.cancel.clone(),
+                |tx, state, conflicting_keys, previous_result, tx_da_size| {
+                    use crate::block_stm::types::{BlockResourceType, EvmStateKey};
+
+                    // 1. Read BlockResourceUsed increments from other txs BEFORE execution to detect conflicts earlier
+                    // These are increments from other transactions within this flashblock (not the base from sequencer)
+                    let gas_increment = state.database.inner_mut()
+                        .read_block_resource(BlockResourceType::Gas)?;
+                    let da_increment = state.database.inner_mut()
+                        .read_block_resource(BlockResourceType::DABytes)?;
+
+                    // Read AddressGasUsed for this address to check rate limiting
+                    let address_gas_used = state.database.inner_mut()
+                        .read_address_gas_used(tx.signer())?;
+
+                    trace!(
+                        target: "payload_builder",
+                        "Read increments: gas_increment={}, da_increment={}, base_gas={}, base_da={}, address_gas_used={}",
+                        gas_increment, da_increment, base_cumulative_gas, base_cumulative_da_bytes, address_gas_used
+                    );
+
+                    // Calculate total cumulative values (base from sequencer + increments from other txs)
+                    let cumulative_gas = base_cumulative_gas.saturating_add(gas_increment);
+                    let cumulative_da_bytes = base_cumulative_da_bytes.saturating_add(da_increment);
+
+                    // 2. Check if we can skip EVM execution
+                    // Can skip if: conflicts are resource-only AND we have a previous result
+                    // Resource-only conflicts are: BlockResourceUsed and AddressGasUsed
+                    let conflicts_are_resource_only = !conflicting_keys.is_empty()
+                        && conflicting_keys.iter().all(|key| {
+                            matches!(key, EvmStateKey::BlockResourceUsed(_) | EvmStateKey::AddressGasUsed(_))
+                        });
+
+                    let can_skip_evm = conflicts_are_resource_only
+                        && previous_result.map(|r| r.result.is_some()).unwrap_or(false);
+
+                    if !conflicting_keys.is_empty() {
+                        trace!(
+                            target: "payload_builder",
+                            conflict_keys_count = conflicting_keys.len(),
+                            resource_only = conflicts_are_resource_only,
+                            has_previous = previous_result.is_some(),
+                            skip_evm = can_skip_evm,
+                            "Block-STM conflict check"
+                        );
+                    }
+
+                    // 3. Execute or reuse
+                    let (result, evm_state) = if can_skip_evm {
+                        trace!(target: "payload_builder", "Skipping EVM re-execution (resource-only conflict)");
+                        // Reuse previous result - extract just the loaded_state, not the full StateWithIncrements
+                        let prev = previous_result.unwrap();
+                        (prev.result.clone().unwrap(), prev.state.loaded_state.clone())
+                    } else {
+                        // Run EVM normally
+                        let lazy_factory = OpLazyEvmFactory;
+                        let mut evm = lazy_factory.create_evm(&mut *state, self.evm_env.clone());
+                        let ResultAndState { result, state: evm_state } = evm.transact(tx)?;
+
+                        // Debug: Check if this tx created the mystery contracts
+                        let addr1 = alloy_primitives::Address::from([0xa1, 0x5b, 0xb6, 0x61, 0x38, 0x82, 0x4a, 0x1c, 0x71, 0x67, 0xf5, 0xe8, 0x5b, 0x95, 0x7d, 0x04, 0xdd, 0x34, 0xe4, 0x68]);
+                        let addr2 = alloy_primitives::Address::from([0x8c, 0xe3, 0x61, 0x60, 0x2b, 0x93, 0x56, 0x80, 0xe8, 0xde, 0xc2, 0x18, 0xb8, 0x20, 0xff, 0x50, 0x56, 0xbe, 0xb7, 0xaf]);
+
+                        for (addr, account) in evm_state.iter() {
+                            if addr == &addr1 || addr == &addr2 {
+                                eprintln!("PARALLEL tx {:?}: Touched address {:?}, storage_slots={}, code_hash={:?}",
+                                    tx.tx_hash(), addr, account.storage.len(), account.info.code_hash);
+                            }
+                        }
+
+                        // Log storage changes in evm_state
+                        let num_accounts_with_storage = evm_state.iter()
+                            .filter(|(_, acct)| !acct.storage.is_empty())
+                            .count();
+                        if num_accounts_with_storage > 0 {
+                            trace!(
+                                target: "payload_builder",
+                                num_accounts_with_storage,
+                                "EVM execution complete with storage changes"
+                            );
+                            for (addr, account) in evm_state.iter() {
+                                if !account.storage.is_empty() {
+                                    trace!(
+                                        target: "payload_builder",
+                                        address = ?addr,
+                                        num_storage_slots = account.storage.len(),
+                                        "Account has storage in EVM state"
+                                    );
+                                }
+                            }
+                        }
+
+                        // evm is dropped here, releasing the borrow on state
+                        (result, evm_state)
+                    };
+
+                    // 5. Validate limits (pre-resource-write checks)
+                    // Check per-tx DA limit
+                    if tx_da_limit.is_some_and(|da_limit| tx_da_size > da_limit) {
+                        return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                            format!("Transaction DA limit exceeded: {} > {}", tx_da_size, tx_da_limit.unwrap())
+                        )));
+                    }
+
+                    // Check block DA limit
+                    let total_da_bytes_used = cumulative_da_bytes.saturating_add(tx_da_size);
+                    trace!(
+                        target: "payload_builder",
+                        cumulative_da_bytes,
+                        tx_da_size,
+                        total_da_bytes_used,
+                        block_da_limit = ?block_da_limit,
+                        "Checking block DA limit"
+                    );
+                    if block_da_limit.is_some_and(|da_limit| total_da_bytes_used > da_limit) {
+                        return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                            format!("Block DA limit exceeded: {} + {} > {}",
+                                cumulative_da_bytes, tx_da_size, block_da_limit.unwrap())
+                        )));
+                    }
+
+                    // Check DA footprint (post-Jovian)
+                    if let Some(da_footprint_gas_scalar) = da_footprint_gas_scalar {
+                        let total_da_bytes_after = cumulative_da_bytes.saturating_add(tx_da_size);
+                        let da_footprint_after = total_da_bytes_after.saturating_mul(da_footprint_gas_scalar as u64);
+                        trace!(
+                            target: "payload_builder",
+                            "DA footprint check: total_da_bytes={}, scalar={}, footprint={}, limit={}",
+                            total_da_bytes_after, da_footprint_gas_scalar, da_footprint_after,
+                            block_da_footprint_limit.unwrap_or(block_gas_limit)
+                        );
+                        if da_footprint_after > block_da_footprint_limit.unwrap_or(block_gas_limit) {
+                            return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                                format!("Block DA footprint limit exceeded: {} > {} (total_da_bytes={}, base={}, da_increment={}, tx_da={}, scalar={})",
+                                    da_footprint_after, block_da_footprint_limit.unwrap_or(block_gas_limit),
+                                    total_da_bytes_after, base_cumulative_da_bytes, da_increment, tx_da_size, da_footprint_gas_scalar)
+                            )));
+                        }
+                    }
+
+                    // 5. Validate gas limits and write updated BlockResourceUsed values
+                    let tx_gas_used = result.gas_used();
+
+                    // Check block gas limit
+                    if cumulative_gas + tx_gas_used > block_gas_limit {
+                        return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                            format!("Gas limit exceeded: {} + {} > {}",
+                                cumulative_gas, tx_gas_used, block_gas_limit)
+                        )));
+                    }
+
+                    // Check max gas per transaction
+                    if let Some(max_gas) = max_gas_per_txn && tx_gas_used > max_gas {
+                        return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                            format!("Transaction gas limit exceeded: {} > {}", tx_gas_used, max_gas)
+                        )));
+                    }
+
+                    // Check address gas limiter (non-mutating check)
+                    // We check against the cumulative gas for this address + current tx gas
+                    if address_gas_limiter
+                        .check_gas_available(tx.signer(), address_gas_used, tx_gas_used)
+                        .is_err()
+                    {
+                        return Err(EVMError::Database(VersionedDbError::BaseDbError(
+                            format!("Address gas limit exceeded for {} (cumulative={}, tx_gas={})",
+                                tx.signer(), address_gas_used, tx_gas_used)
+                        )));
+                    }
+
+                    // 6. Write updated BlockResourceUsed cumulative values (EXCLUDING base from sequencer)
+                    // Write the cumulative of user transactions ONLY (gas_increment + this tx)
+                    // The base is added when reading for limit checks, preventing double-counting
+                    let new_gas_cumulative = gas_increment + tx_gas_used;
+                    let new_da_cumulative = da_increment + tx_da_size;
+                    let new_address_gas_cumulative = address_gas_used + tx_gas_used;
+
+                    trace!(
+                        target: "payload_builder",
+                        "Writing increments: new_gas={}, new_da={}, new_address_gas={} (gas_increment={} + tx_gas={}, da_increment={} + tx_da={}, address_gas={} + tx_gas={})",
+                        new_gas_cumulative, new_da_cumulative, new_address_gas_cumulative, gas_increment, tx_gas_used, da_increment, tx_da_size, address_gas_used, tx_gas_used
+                    );
+
+                    state.database.inner_mut().write_block_resource(
+                        BlockResourceType::Gas,
+                        new_gas_cumulative
+                    )?;
+                    state.database.inner_mut().write_block_resource(
+                        BlockResourceType::DABytes,
+                        new_da_cumulative
+                    )?;
+                    state.database.inner_mut().write_address_gas_used(
+                        tx.signer(),
+                        new_address_gas_cumulative
+                    )?;
+
+                    Ok(ResultAndState { result, state: evm_state })
+                },
+                execute_txs_span.clone(),
+            );
+
+            executor.try_into_committed_results()?
+        };
+        // Process committed transactions in order up to the safe commit point.
+        // When cancelled, only transactions [0..safe_commit_point] are guaranteed valid.
+        let mut applied_count = 0;
+        let num_results = results.len();
+        for (tx_idx, tx_result) in results.into_iter().enumerate() {
+            let Some(result) = tx_result.result else {
+                info!("missing result for {}", tx_idx);
+                continue;
+            };
+
+            // Check if we should exclude reverting transactions (bundle revert protection)
+            // Same logic as sequential version in execute_best_transactions
+            let reverted_hashes = &tx_reverted_hashes[tx_idx];
+            let tx_hash = tx_result.tx.tx_hash();
+            let is_bundle_tx = reverted_hashes.is_some();
+            let exclude_reverting_txs =
+                is_bundle_tx && !reverted_hashes.as_ref().unwrap().contains(&tx_hash);
+
+            // If the transaction reverted and we should exclude reverting txs, skip it
+            if !result.is_success() && exclude_reverting_txs {
+                info!(
+                    target: "payload_builder",
+                    tx_hash = ?tx_hash,
+                    result = ?result,
+                    "skipping reverted bundle transaction (parallel mode)"
+                );
+                // Don't include this transaction in the block
+                continue;
+            }
+
+            // Update cumulative gas before building receipt
+            let gas_used = result.gas_used();
+            info.cumulative_gas_used += gas_used;
+            info.cumulative_da_bytes_used += tx_result.tx_da_size;
+            info.total_fees += U256::from(tx_result.miner_fee) * U256::from(gas_used);
+
+            // Save pending balance increment addresses before moving state
+            let pending_balance_addrs: Vec<_> = tx_result
+                .state
+                .pending_balance_increments
+                .keys()
+                .copied()
+                .collect();
+
+            let mut resolved_state = tx_result
+                .state
+                .resolve_state(db)
+                .map_err(|e| PayloadBuilderError::Other(e.to_string().into()))?;
+
+            // Load accounts into cache before committing
+            for (address, _) in resolved_state.iter() {
+                let _ = db.load_cache_account(*address);
+            }
+            for address in pending_balance_addrs {
+                if !resolved_state.contains_key(&address) {
+                    let _ = db.load_cache_account(address);
+                }
+            }
+
+            let mut mock_db = MockDB;
+            let evm = self
+                .evm_config
+                .evm_with_env(&mut mock_db, self.evm_env.clone());
+
+            // Build OpReceipt based on transaction type
+            info.receipts.push(self.build_receipt_parallel(
+                ReceiptBuilderCtx {
+                    tx: &tx_result.tx,
+                    evm: &evm,
+                    result,
+                    state: &resolved_state,
+                    cumulative_gas_used: info.cumulative_gas_used,
+                },
+                None,
+            ));
+
+            // Populate code field from shared cache for newly deployed contracts
+            // Without this, account.info.code is None and won't be stored in State.cache.contracts
+            for (_addr, account) in resolved_state.iter_mut() {
+                if let Some(code) = shared_code_cache.get(&account.info.code_hash) {
+                    account.info.code = Some(code.clone());
+                }
+            }
+
+            // Commit resolved state to actual DB
+            let num_accounts_with_storage = resolved_state
+                .iter()
+                .filter(|(_, acct)| !acct.storage.is_empty())
+                .count();
+
+            trace!(
+                target: "payload_builder",
+                mode = "parallel",
+                tx_hash = ?tx_result.tx.tx_hash(),
+                num_accounts = resolved_state.len(),
+                num_accounts_with_storage,
+                "PARALLEL: Before commit"
+            );
+
+            if num_accounts_with_storage > 0 {
+                for (addr, account) in resolved_state.iter() {
+                    if !account.storage.is_empty() {
+                        let num_changed = account
+                            .storage
+                            .iter()
+                            .filter(|(_, v)| v.is_changed())
+                            .count();
+                        trace!(
+                            target: "payload_builder",
+                            address = ?addr,
+                            num_storage_slots = account.storage.len(),
+                            num_changed_slots = num_changed,
+                            is_touched = account.is_touched(),
+                            is_selfdestructed = account.is_selfdestructed(),
+                            "Account has storage in resolved_state before commit"
+                        );
+                    }
+                }
+            }
+            db.commit(resolved_state);
+
+            // Consume gas in address gas limiter now that the transaction is committed
+            // This updates the actual token bucket for rate limiting
+            if let Err(e) = self
+                .address_gas_limiter
+                .consume_gas(tx_result.tx.signer(), gas_used)
+            {
+                // This should not happen since we already checked in the execution phase
+                // But log it for debugging
+                warn!(
+                    target: "payload_builder",
+                    error = ?e,
+                    address = ?tx_result.tx.signer(),
+                    gas_used = gas_used,
+                    "Failed to consume gas in address limiter after commit (should not happen)"
+                );
+            }
+
+            // Record transaction
+            info.executed_senders.push(tx_result.tx.signer());
+            info.executed_transactions.push(tx_result.tx.into_inner());
+
+            applied_count += 1;
+            trace!(
+                cumulative_gas = info.cumulative_gas_used,
+                "Committed transaction"
+            );
+        }
+
+        info!(
+            target: "payload_builder",
+            "Block-STM commit phase complete: applied {} of {} candidates (safe_commit_point={})",
+            applied_count, num_candidates, num_results
+        );
+
         Ok(None)
     }
 }
