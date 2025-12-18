@@ -36,10 +36,12 @@ use reth_revm::{State, context::Block};
 use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction};
 use revm::{DatabaseCommit, context::result::ResultAndState, interpreter::as_u64_saturated};
 use std::{sync::Arc, time::Instant};
+use tips_audit::BundleEvent;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
+    bundles::AuditSender,
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -80,6 +82,10 @@ pub struct OpPayloadBuilderCtx<ExtraCtx: Debug + Default = ()> {
     pub address_gas_limiter: AddressGasLimiter,
     /// Per transaction resource metering information
     pub resource_metering: ResourceMetering,
+    /// Backrun bundle store for storing backrun transactions
+    pub backrun_bundle_store: crate::bundles::BackrunBundleStore,
+    /// Audit event channel for backrun bundle lifecycle tracking
+    pub audit_tx: Option<AuditSender>,
 }
 
 impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
@@ -89,6 +95,19 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
     pub(super) fn with_extra_ctx(self, extra_ctx: ExtraCtx) -> Self {
         Self { extra_ctx, ..self }
+    }
+
+    /// Send an audit event if the audit channel is configured
+    fn send_audit_event(&self, event: BundleEvent) {
+        if let Some(ref audit_tx) = self.audit_tx {
+            if let Err(e) = audit_tx.send(event) {
+                warn!(
+                    target: "payload_builder",
+                    error = %e,
+                    "Failed to send audit event"
+                );
+            }
+        }
     }
 
     /// Returns the parent block the payload will be build on.
@@ -445,6 +464,16 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
 
             num_txs_considered += 1;
 
+            // Look up bundle_id for this tx (registered via base_txBundleId RPC)
+            let bundle_id = self.backrun_bundle_store.get_tx_bundle_id(&tx_hash);
+
+            self.send_audit_event(BundleEvent::StartExecuting {
+                bundle_id,
+                tx_hash,
+                block_number: self.block_number(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            });
+
             let _resource_usage = self.resource_metering.get(&tx_hash);
 
             // TODO: ideally we should get this from the txpool stream
@@ -543,7 +572,9 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 continue;
             }
 
-            if result.is_success() {
+            let is_success = result.is_success();
+
+            if is_success {
                 log_txn(TxnExecutionResult::Success);
                 num_txs_simulated_success += 1;
                 self.metrics.successful_tx_gas_used.record(gas_used as f64);
@@ -600,6 +631,79 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
             // append sender and transaction to the respective lists
             info.executed_senders.push(tx.signer());
             info.executed_transactions.push(tx.into_inner());
+
+            self.send_audit_event(BundleEvent::Executed {
+                bundle_id,
+                tx_hash,
+                block_number: self.block_number(),
+                gas_used,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            });
+
+            if is_success && let Some(backrun_bundles) = self.backrun_bundle_store.get(&tx_hash) {
+                self.metrics.backrun_target_txs_found_total.increment(1);
+
+                for stored_bundle in backrun_bundles {
+                    let bundle_id = stored_bundle.bundle_id;
+                    for backrun_tx in stored_bundle.backrun_txs {
+                        let ResultAndState { result, state } = match evm.transact(&backrun_tx) {
+                            Ok(res) => res,
+                            Err(err) => {
+                                return Err(PayloadBuilderError::evm(err));
+                            }
+                        };
+
+                        let backrun_gas_used = result.gas_used();
+                        let is_backrun_success = result.is_success();
+
+                        if !is_backrun_success {
+                            self.send_audit_event(BundleEvent::BackrunBundleExecuted {
+                                bundle_id,
+                                target_tx_hash: tx_hash,
+                                backrun_tx_hash: backrun_tx.tx_hash(),
+                                block_number: self.block_number(),
+                                gas_used: backrun_gas_used,
+                                success: false,
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            });
+
+                            continue;
+                        }
+
+                        info.cumulative_gas_used += backrun_gas_used;
+                        info.cumulative_da_bytes_used += backrun_tx.encoded_2718().len() as u64;
+
+                        let ctx = ReceiptBuilderCtx {
+                            tx: backrun_tx.inner(),
+                            evm: &evm,
+                            result,
+                            state: &state,
+                            cumulative_gas_used: info.cumulative_gas_used,
+                        };
+                        info.receipts.push(self.build_receipt(ctx, None));
+
+                        evm.db_mut().commit(state);
+
+                        self.send_audit_event(BundleEvent::BackrunBundleExecuted {
+                            bundle_id,
+                            target_tx_hash: tx_hash,
+                            backrun_tx_hash: backrun_tx.tx_hash(),
+                            block_number: self.block_number(),
+                            gas_used: backrun_gas_used,
+                            success: true,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                        });
+
+                        let miner_fee = backrun_tx
+                            .effective_tip_per_gas(base_fee)
+                            .expect("fee is always valid; execution succeeded");
+                        info.total_fees += U256::from(miner_fee) * U256::from(backrun_gas_used);
+
+                        info.executed_senders.push(backrun_tx.signer());
+                        info.executed_transactions.push(backrun_tx.into_inner());
+                    }
+                }
+            }
         }
 
         let payload_transaction_simulation_time = execute_txs_start_time.elapsed();

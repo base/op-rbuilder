@@ -216,4 +216,6 @@ opentelemetry = { version = "0.31", features = ["trace"] }
 
 # Base Path
 concurrent-queue = "2.5.0"
-tips-core = { git = "https://github.com/base/tips", rev = "c08eaa4fe10c26de8911609b41ddab4918698325", default-features = false }
+tips-core = { git = "https://github.com/base/tips", rev = "2f0a86bcde3e33c401d9fe5454b26b0478f2484c", default-features = false }
+tips-audit = { git = "https://github.com/base/tips", rev = "2f0a86bcde3e33c401d9fe5454b26b0478f2484c" }
+rdkafka = { version = "0.37" }
