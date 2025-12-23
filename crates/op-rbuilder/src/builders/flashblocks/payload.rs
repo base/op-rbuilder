@@ -41,7 +41,7 @@ use reth_revm::{
 };
 use reth_transaction_pool::TransactionPool;
 use reth_trie::{HashedPostState, updates::TrieUpdates};
-use revm::Database;
+use revm::{Database, DatabaseRef};
 use rollup_boost::{
     ExecutionPayloadBaseV1, ExecutionPayloadFlashblockDeltaV1, FlashblocksPayloadV1,
 };
@@ -283,6 +283,7 @@ where
             max_gas_per_txn: self.config.max_gas_per_txn,
             address_gas_limiter: self.address_gas_limiter.clone(),
             resource_metering: self.config.resource_metering.clone(),
+            parallel_threads: self.config.parallel_threads,
         })
     }
 
@@ -301,7 +302,7 @@ where
     ) -> Result<(), PayloadBuilderError> {
         let block_build_start_time = Instant::now();
         let BuildArguments {
-            mut cached_reads,
+            cached_reads: _, // Flashblocks always uses parallel execution which doesn't use cached_reads
             config,
             cancel: block_cancel,
         } = args;
@@ -344,7 +345,7 @@ where
         // 1. execute the pre steps and seal an early block with that
         let sequencer_tx_start_time = Instant::now();
         let mut state = State::builder()
-            .with_database(cached_reads.as_db_mut(db))
+            .with_database(db)
             .with_bundle_update()
             .build();
 
@@ -524,6 +525,7 @@ where
                     parent: &span,
                     Level::INFO,
                     "build_flashblock",
+                    num_threads = ctx.parallel_threads
                 )
             };
             let _entered = fb_span.enter();
@@ -596,7 +598,12 @@ where
 
     #[allow(clippy::too_many_arguments)]
     async fn build_next_flashblock<
-        DB: Database<Error = ProviderError> + std::fmt::Debug + AsRef<P>,
+        DB: Database<Error = ProviderError>
+            + DatabaseRef<Error = ProviderError>
+            + std::fmt::Debug
+            + AsRef<P>
+            + Send
+            + Sync,
         P: StateRootProvider + HashedPostStateProvider + StorageRootProvider,
     >(
         &self,
@@ -681,15 +688,93 @@ where
             .set(transaction_pool_fetch_time);
 
         let tx_execution_start_time = Instant::now();
-        ctx.execute_best_transactions(
-            info,
-            state,
-            best_txs,
-            target_gas_for_batch.min(ctx.block_gas_limit()),
-            target_da_for_batch,
-            target_da_footprint_for_batch,
-        )
-        .wrap_err("failed to execute best transactions")?;
+
+        // Use parallel execution only when parallel_threads > 1
+        if ctx.parallel_threads > 1 {
+            let ctx = ctx.clone().into_lazy_evm();
+            ctx.execute_best_transactions_parallel(
+                info,
+                state,
+                best_txs,
+                target_gas_for_batch.min(ctx.block_gas_limit()),
+                target_da_for_batch,
+                target_da_footprint_for_batch,
+            )
+            .wrap_err("failed to execute best transactions")?;
+        } else {
+            // Sequential execution for single-threaded mode
+            ctx.execute_best_transactions(
+                info,
+                state,
+                best_txs,
+                target_gas_for_batch.min(ctx.block_gas_limit()),
+                target_da_for_batch,
+                target_da_footprint_for_batch,
+            )
+            .wrap_err("failed to execute best transactions")?;
+            // #region agent log
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/home/meyer9/op-rbuilder/.cursor/debug.log")
+            {
+                // Log cache state info
+                let cache_accounts: Vec<_> = state
+                    .cache
+                    .accounts
+                    .iter()
+                    .map(|(addr, acc)| {
+                        let code_len = acc
+                            .account
+                            .as_ref()
+                            .and_then(|a| a.info.code.as_ref())
+                            .map(|c| c.len())
+                            .unwrap_or(0);
+                        let code_hash = acc
+                            .account
+                            .as_ref()
+                            .map(|a| format!("{}", a.info.code_hash))
+                            .unwrap_or_default();
+                        format!("{}:code_len={},code_hash={}", addr, code_len, code_hash)
+                    })
+                    .collect();
+                let cache_contracts: Vec<_> = state
+                    .cache
+                    .contracts
+                    .iter()
+                    .map(|(hash, code)| format!("{}:len={}", hash, code.len()))
+                    .collect();
+
+                // Log transition_state if present
+                let transition_state_info = if let Some(ref ts) = state.transition_state {
+                    let transitions: Vec<_> = ts
+                        .transitions
+                        .iter()
+                        .map(|(addr, trans)| format!("{}:status={:?}", addr, trans.status))
+                        .collect();
+                    format!("Some({}transitions)", transitions.len())
+                } else {
+                    "None".to_string()
+                };
+
+                let _ = writeln!(
+                    f,
+                    r#"{{"hypothesisId":"D","location":"payload.rs:after_sequential","message":"State after sequential execution","data":{{"mode":"sequential","flashblock_index":{},"cache_accounts_count":{},"cache_contracts_count":{},"transition_state":"{}","cache_accounts":{:?},"cache_contracts":{:?},"timestamp":{}}}}}"#,
+                    flashblock_index,
+                    state.cache.accounts.len(),
+                    state.cache.contracts.len(),
+                    transition_state_info,
+                    cache_accounts,
+                    cache_contracts,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                );
+            }
+            // #endregion
+        }
         // Extract last transactions
         let new_transactions = info.executed_transactions[info.extra.last_flashblock_index..]
             .to_vec()
@@ -874,6 +959,7 @@ where
         // FCU(a) could arrive with `block_time - fb_time < delay`. In this case we could only produce 1 flashblock
         // FCU(a) could arrive with `delay < fb_time` - in this case we will shrink first flashblock
         // FCU(a) could arrive with `fb_time < delay < block_time - fb_time` - in this case we will issue less flashblocks
+
         let target_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp)
             - self.config.specific.leeway_time;
         let now = std::time::SystemTime::now();
