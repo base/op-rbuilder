@@ -316,7 +316,7 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx> {
                 .then(|| {
                     evm.db_mut()
                         .load_cache_account(sequencer_tx.signer())
-                        .map(|acc| acc.account_info().unwrap_or_default().nonce)
+                        .map(|acc| acc.account_info().ok_or(PayloadBuilderError::other("MissingAccountInfo"))?.nonce)
                 })
                 .transpose()
                 .map_err(|_| {
