@@ -189,15 +189,16 @@ impl Scheduler {
 
     pub fn add_dependency(&self, txn_idx: TxnIndex, blocking_txn_idx: TxnIndex) -> bool {
         {
-            let mut dependencies = self.txn_dependency[txn_idx as usize].lock().unwrap();
+            let mut dependencies = self.txn_dependency[blocking_txn_idx as usize]
+                .lock()
+                .unwrap();
             if self.txn_status[blocking_txn_idx as usize].lock().unwrap().1
                 == ExecutionStatus::Executed
             {
                 return false;
             }
 
-            self.txn_status[blocking_txn_idx as usize].lock().unwrap().1 =
-                ExecutionStatus::Aborting;
+            self.txn_status[txn_idx as usize].lock().unwrap().1 = ExecutionStatus::Aborting;
             dependencies.insert(txn_idx);
         }
         // TaskGuard will be dropped by the executor, automatically decrementing num_active_tasks
