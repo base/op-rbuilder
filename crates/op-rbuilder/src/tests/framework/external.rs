@@ -237,6 +237,40 @@ impl ExternalNode {
         );
 
         if result.status != PayloadStatusEnum::Valid {
+            // print out container logs
+            match self
+                .docker
+                .attach_container(
+                    &self.container_id,
+                    Some(AttachContainerOptions::<String> {
+                        stdout: Some(true),
+                        stderr: Some(true),
+                        stream: Some(true),
+                        logs: Some(true),
+                        ..Default::default()
+                    }),
+                )
+                .await
+            {
+                Ok(stream) => {
+                    let mut attach_stream = stream;
+                    debug!("Container logs for {}:", self.container_id);
+                    while let Some(Ok(output)) = attach_stream.output.next().await {
+                        use testcontainers::bollard::container::LogOutput;
+                        match output {
+                            LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                                let message = String::from_utf8_lossy(&message);
+                                debug!("{}", message.trim_end());
+                            }
+                            LogOutput::StdIn { .. } | LogOutput::Console { .. } => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to attach to container {}: {}", self.container_id, e);
+                }
+            };
+
             return Err(eyre::eyre!(
                 "Failed to validate block {new_block_hash} with external validation node."
             ));
