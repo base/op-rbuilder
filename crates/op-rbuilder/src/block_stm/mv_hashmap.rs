@@ -78,22 +78,16 @@ impl MVHashMap {
         write_set: &WriteSet,
     ) {
         for (key, value) in write_set {
-            match self.data.get_mut(key) {
-                Some(version_map) => {
-                    version_map.write().insert(
-                        txn_idx,
-                        MVHashMapValue::Write(incarnation_number, value.clone()),
-                    );
-                }
-                None => {
-                    let mut new_map = HashMap::new();
-                    new_map.insert(
-                        txn_idx,
-                        MVHashMapValue::Write(incarnation_number, value.clone()),
-                    );
-                    self.data.insert(key.clone(), RwLock::new(new_map));
-                }
-            }
+            // Use entry() API for atomic insert-or-update to avoid TOCTOU race
+            // where concurrent get_mut() + insert() could lose writes
+            self.data
+                .entry(key.clone())
+                .or_insert_with(|| RwLock::new(HashMap::new()))
+                .write()
+                .insert(
+                    txn_idx,
+                    MVHashMapValue::Write(incarnation_number, value.clone()),
+                );
         }
     }
 
@@ -618,6 +612,58 @@ mod tests {
 
         // Now validation should pass
         assert!(mv.validate_read_set(5));
+    }
+
+    #[test]
+    fn test_reexecution_removes_old_keys() {
+        // When a transaction re-executes with a different write set,
+        // the old keys that are no longer written should be removed.
+        let mv = MVHashMap::new(3);
+        let key_a = make_storage_key(0);
+        let key_b = make_storage_key(1);
+
+        // Tx 0 initially writes to key_a and key_b
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key_a.clone(), make_storage_value(100)));
+        ws0.insert((key_b.clone(), make_storage_value(200)));
+        mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx 1 should see both writes
+        match mv.read(&key_a, 1) {
+            ReadResult::Value { value, version } => {
+                assert_eq!(value, make_storage_value(100));
+                assert_eq!(version.txn_idx, 0);
+            }
+            _ => panic!("Expected Value for key_a"),
+        }
+        match mv.read(&key_b, 1) {
+            ReadResult::Value { value, version } => {
+                assert_eq!(value, make_storage_value(200));
+                assert_eq!(version.txn_idx, 0);
+            }
+            _ => panic!("Expected Value for key_b"),
+        }
+
+        // Tx 0 re-executes and only writes to key_a (not key_b anymore)
+        let mut ws0_new = WriteSet::new();
+        ws0_new.insert((key_a.clone(), make_storage_value(150)));
+        mv.record(Version::new(0, 1), &ReadSet::new(), &ws0_new);
+
+        // Tx 1 should see updated key_a
+        match mv.read(&key_a, 1) {
+            ReadResult::Value { value, version } => {
+                assert_eq!(value, make_storage_value(150));
+                assert_eq!(version.txn_idx, 0);
+                assert_eq!(version.incarnation, 1);
+            }
+            _ => panic!("Expected Value for key_a after re-execution"),
+        }
+
+        // Tx 1 should NOT see key_b anymore (it was removed)
+        assert!(
+            matches!(mv.read(&key_b, 1), ReadResult::NotFound),
+            "key_b should be NotFound after re-execution removed it"
+        );
     }
 
     // ==================== BALANCE INCREMENT TESTS ====================
