@@ -32,6 +32,8 @@ pub(super) struct OpPayloadSyncerCtx {
     metrics: Arc<OpRBuilderMetrics>,
     /// Unified transaction data store (backrun bundles + resource metering)
     tx_data_store: TxDataStore,
+    /// Number of parallel threads for transaction execution.
+    parallel_threads: usize,
 }
 
 impl OpPayloadSyncerCtx {
@@ -52,6 +54,7 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: builder_config.max_gas_per_txn,
             metrics,
             tx_data_store: builder_config.tx_data_store,
+            parallel_threads: builder_config.parallel_threads,
         })
     }
 
@@ -85,6 +88,7 @@ impl OpPayloadSyncerCtx {
             max_gas_per_txn: self.max_gas_per_txn,
             address_gas_limiter: AddressGasLimiter::new(GasLimiterArgs::default()),
             tx_data_store: self.tx_data_store.clone(),
+            parallel_threads: self.parallel_threads,
         }
     }
 }
