@@ -11,11 +11,13 @@
 //! - **Concurrent Access**: Uses fine-grained locking for parallel read/write
 
 use crate::block_stm::types::{
-    EvmStateKey, EvmStateValue, Incarnation, ReadResult, TxnIndex, Version,
+    EvmStateKey, EvmStateValue, Incarnation, ReadCumulativeResult, ReadResult, TxnIndex, Version,
 };
+use alloy_primitives::U256;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use tracing::info;
 
 pub type WriteSet = HashSet<(EvmStateKey, EvmStateValue)>;
 
@@ -138,6 +140,55 @@ impl MVHashMap {
         MVHashMap::read_internal(&version_map, reader_idx)
     }
 
+    pub fn read_cumulative_balance(
+        &self,
+        location: &EvmStateKey,
+        reader_idx: TxnIndex,
+    ) -> ReadCumulativeResult {
+        // same as read, but if a BalanceIncrement is found, add it to a cumulative total, and find the previous value until we hit the first write that isn't a BalanceIncrement
+        let mut cumulative_total = U256::ZERO;
+        let mut current_version = reader_idx;
+        while current_version > 0 {
+            let read_result = self.read(location, current_version);
+            info!(
+                "Read result for address {:?}, txn_idx={}: {:?}",
+                location, current_version, read_result
+            );
+            match read_result {
+                ReadResult::Value { value, version } => {
+                    if let EvmStateValue::BalanceIncrement(increment) = value {
+                        // continue to the previous version
+                        cumulative_total += increment;
+                        current_version = version.txn_idx;
+                    } else if let EvmStateValue::Balance(balance) = value {
+                        // we hit a balance write, so return the cumulative total
+                        return ReadCumulativeResult::Value {
+                            value: balance + cumulative_total,
+                            version,
+                        };
+                    } else {
+                        panic!(
+                            "read_cumulative_balance should only read BalanceIncrement or Balance, got {:?}",
+                            value
+                        );
+                    }
+                }
+                ReadResult::Aborted { txn_idx } => {
+                    return ReadCumulativeResult::Aborted { txn_idx };
+                }
+                ReadResult::NotFound => {
+                    // this tx read from the base state
+                    return ReadCumulativeResult::NotFound {
+                        increment_total: cumulative_total,
+                    };
+                }
+            }
+        }
+        ReadCumulativeResult::NotFound {
+            increment_total: cumulative_total,
+        }
+    }
+
     fn read_internal(
         version_map: &HashMap<TxnIndex, MVHashMapValue>,
         reader_idx: TxnIndex,
@@ -171,8 +222,19 @@ impl MVHashMap {
                 ReadResult::NotFound if version.is_some() => return false,
                 ReadResult::Value {
                     version: read_version,
-                    ..
-                } if Some(read_version) != *version => return false,
+                    value,
+                } => {
+                    if let EvmStateValue::BalanceIncrement(_) = value {
+                        // balance increments are always invalid - we should keep re-executing until we have ReadCumulativeResult::NotFound which gives us a balance offset from the base state or a Balance write
+                        info!(
+                            "read set invalid due to balance increment in read set - must be resolved to either a Balance write or the base state"
+                        );
+                        return false;
+                    }
+                    if Some(read_version) != *version {
+                        return false;
+                    }
+                }
                 _ => continue,
             }
         }
@@ -203,13 +265,50 @@ impl MVHashMap {
                 }
                 ReadResult::Value {
                     version: read_version,
-                    ..
-                } if Some(read_version) != *version => {
-                    return ValidationResult::Conflict {
-                        key: location.clone(),
-                        expected_version: *version,
-                        actual_version: Some(read_version),
-                    };
+                    value,
+                } => {
+                    if let EvmStateValue::BalanceIncrement(_) = value {
+                        // if the read returns a balance increment, we should call read_cumulative_balance to get the actual value that the tx was read from
+                        let cumulative_result = self.read_cumulative_balance(location, txn_idx);
+                        match cumulative_result {
+                            ReadCumulativeResult::Value {
+                                version: read_version,
+                                ..
+                            } => {
+                                if Some(read_version) != *version {
+                                    return ValidationResult::Conflict {
+                                        key: location.clone(),
+                                        expected_version: *version,
+                                        actual_version: Some(read_version),
+                                    };
+                                }
+                                continue;
+                            }
+                            ReadCumulativeResult::NotFound { .. } => {
+                                if version.is_some() {
+                                    return ValidationResult::Conflict {
+                                        key: location.clone(),
+                                        expected_version: *version,
+                                        actual_version: None,
+                                    };
+                                }
+                            }
+                            ReadCumulativeResult::Aborted { txn_idx } => {
+                                return ValidationResult::Conflict {
+                                    key: location.clone(),
+                                    expected_version: *version,
+                                    actual_version: Some(Version::new(txn_idx, 0)),
+                                };
+                            }
+                        }
+                    }
+                    if Some(read_version) != *version {
+                        return ValidationResult::Conflict {
+                            key: location.clone(),
+                            expected_version: *version,
+                            actual_version: Some(read_version),
+                        };
+                    }
                 }
                 _ => continue,
             }

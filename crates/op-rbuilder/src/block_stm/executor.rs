@@ -18,7 +18,7 @@ use revm::{
     state::{Account, EvmState},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, debug};
+use tracing::{Span, debug, info};
 
 use crate::{
     block_stm::{
@@ -227,6 +227,10 @@ impl<
                             EvmStateKey::Balance(*addr),
                             EvmStateValue::BalanceIncrement(*delta),
                         ));
+                        info!(
+                            "Added balance increment for address {:?}: {:?}",
+                            addr, delta
+                        );
                     }
 
                     // Add writes only for values that actually changed

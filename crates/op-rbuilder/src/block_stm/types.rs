@@ -153,6 +153,13 @@ pub enum ReadResult {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum ReadCumulativeResult {
+    Value { value: U256, version: Version },
+    Aborted { txn_idx: TxnIndex },
+    NotFound { increment_total: U256 },
+}
+
 /// Represents a read operation recorded during transaction execution.
 #[derive(Debug, Clone)]
 pub struct RecordedRead {

@@ -12,7 +12,7 @@
 
 use crate::block_stm::{
     mv_hashmap::{MVHashMap, ReadSet},
-    types::{EvmStateKey, EvmStateValue, ReadResult, TxnIndex, Version},
+    types::{EvmStateKey, EvmStateValue, ReadCumulativeResult, ReadResult, TxnIndex, Version},
 };
 use alloy_primitives::{Address, B256, U256};
 use dashmap::DashMap;
@@ -22,6 +22,7 @@ use revm::{
     state::AccountInfo,
 };
 use std::{cmp::min, sync::Arc};
+use tracing::info;
 
 /// Shared cache for contract bytecode.
 /// Maps code_hash -> bytecode for contracts deployed within the same block.
@@ -383,12 +384,48 @@ where
                 }
                 ReadResult::Value {
                     value: EvmStateValue::BalanceIncrement(_),
-                    version,
+                    version: _, // ignore version because we'll reread this value using read_cumulative_balance
                 } => {
-                    // Reading a balance increment counts as an aborted read since we can't know all previous increments
-                    return Err(VersionedDbError::ReadAborted {
-                        aborted_txn_idx: version.txn_idx,
-                    });
+                    info!(
+                        "Read balance increment for address {:?}, txn_idx={}",
+                        address, self.txn_idx
+                    );
+                    // if we observe an increment, the account must exist
+                    did_exist = true;
+
+                    // when we read a balance increment, try to resolve it by reading balance increments back to the base state or a Balance write
+                    let cumulative_result = self
+                        .mv_hashmap
+                        .read_cumulative_balance(&balance_key, self.txn_idx);
+
+                    info!(
+                        "Cumulative result for address {:?}: {:?}",
+                        address, cumulative_result
+                    );
+                    match cumulative_result {
+                        ReadCumulativeResult::Value { value, version } => {
+                            self.add_to_reads(
+                                balance_key,
+                                EvmStateValue::Balance(value),
+                                Some(version),
+                            );
+                            base_info.balance = value;
+                        }
+                        ReadCumulativeResult::Aborted { txn_idx } => {
+                            return Err(VersionedDbError::ReadAborted {
+                                aborted_txn_idx: txn_idx,
+                            });
+                        }
+                        ReadCumulativeResult::NotFound { increment_total } => {
+                            // we hit the base state, so add the increment total to the base balance
+                            base_info.balance += increment_total;
+                            self.add_to_reads(
+                                balance_key,
+                                EvmStateValue::Balance(base_info.balance),
+                                None,
+                            );
+                        }
+                    }
                 }
                 ReadResult::Value { value, version } => {
                     return Err(VersionedDbError::InvalidValue {
