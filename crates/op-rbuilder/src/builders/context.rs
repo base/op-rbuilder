@@ -961,26 +961,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                 |tx, state, conflicting_keys, previous_result, tx_da_size| {
                     use crate::block_stm::types::{BlockResourceType, EvmStateKey};
 
-                    // 1. Read BlockResourceUsed increments from other txs BEFORE execution to detect conflicts earlier
-                    // These are increments from other transactions within this flashblock (not the base from sequencer)
-                    let gas_increment = state.inner_mut().database
-                        .read_block_resource(BlockResourceType::Gas)?;
-                    let da_increment = state.inner_mut().database
-                        .read_block_resource(BlockResourceType::DABytes)?;
-
-                    // Read AddressGasUsed for this address to check rate limiting
-                    let address_gas_used = state.inner_mut().database
-                        .read_address_gas_used(tx.signer())?;
-
-                    trace!(
-                        target: "payload_builder",
-                        "Read increments: gas_increment={}, da_increment={}, base_gas={}, base_da={}, address_gas_used={}",
-                        gas_increment, da_increment, base_cumulative_gas, base_cumulative_da_bytes, address_gas_used
-                    );
-
-                    // Calculate total cumulative values (base from sequencer + increments from other txs)
-                    let cumulative_gas = base_cumulative_gas.saturating_add(gas_increment);
-                    let cumulative_da_bytes = base_cumulative_da_bytes.saturating_add(da_increment);
 
                     // 2. Check if we can skip EVM execution
                     // Can skip if: conflicts are resource-only AND we have a previous result
@@ -1044,6 +1024,22 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                             format!("Transaction DA limit exceeded: {} > {}", tx_da_size, tx_da_limit.unwrap())
                         )));
                     }
+
+
+                    // 1. Read BlockResourceUsed increments from other txs BEFORE execution to detect conflicts earlier
+                    // These are increments from other transactions within this flashblock (not the base from sequencer)
+                    let gas_increment = state.inner_mut().database
+                        .read_block_resource(BlockResourceType::Gas)?;
+                    let da_increment = state.inner_mut().database
+                        .read_block_resource(BlockResourceType::DABytes)?;
+
+                    // Read AddressGasUsed for this address to check rate limiting
+                    let address_gas_used = state.inner_mut().database
+                        .read_address_gas_used(tx.signer())?;
+
+                    // Calculate total cumulative values (base from sequencer + increments from other txs)
+                    let cumulative_gas = base_cumulative_gas.saturating_add(gas_increment);
+                    let cumulative_da_bytes = base_cumulative_da_bytes.saturating_add(da_increment);
 
                     // Check block DA limit
                     let total_da_bytes_used = cumulative_da_bytes.saturating_add(tx_da_size);
