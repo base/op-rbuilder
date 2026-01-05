@@ -156,17 +156,20 @@ impl<
 
                     prev_read_set
                         .iter()
-                        .filter_map(|(key, expected_version)| {
+                        .filter_map(|(key, expected_versions)| {
                             // Check if this key's current version matches expected
                             let current_read = self.mv_hashmap.read(key, txn_idx);
-                            match (expected_version, &current_read) {
-                                (Some(expected_ver), ReadResult::Value { version, .. })
+                            match (&expected_versions[..], &current_read) {
+                                // Expected some versions but got a different version
+                                ([expected_ver, ..], ReadResult::Value { version, .. })
                                     if version != expected_ver =>
                                 {
                                     Some(key.clone())
                                 }
-                                (None, ReadResult::Value { .. }) => Some(key.clone()),
-                                (Some(_), ReadResult::NotFound) => Some(key.clone()),
+                                // Expected base state but found a value
+                                ([], ReadResult::Value { .. }) => Some(key.clone()),
+                                // Expected some version but found nothing
+                                ([_, ..], ReadResult::NotFound) => Some(key.clone()),
                                 _ => None,
                             }
                         })
@@ -530,8 +533,8 @@ impl<
                             if aborted {
                                 if let ValidationResult::Conflict {
                                     key,
-                                    expected_version,
-                                    actual_version,
+                                    expected_versions,
+                                    actual_versions,
                                 } = validation_result
                                 {
                                     debug!(
@@ -539,8 +542,8 @@ impl<
                                         txn_idx = txn_idx,
                                         incarnation = incarnation,
                                         key = %key,
-                                        expected_version = ?expected_version,
-                                        actual_version = ?actual_version,
+                                        expected_versions = ?expected_versions,
+                                        actual_versions = ?actual_versions,
                                         "Block-STM conflict detected: transaction aborted due to stale read"
                                     );
                                 }

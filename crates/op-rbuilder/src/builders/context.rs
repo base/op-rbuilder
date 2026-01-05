@@ -1016,9 +1016,21 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                         let mut evm = lazy_factory.create_evm(&mut *state, self.evm_env.clone());
                         let ResultAndState { result, state: evm_state } = evm.transact(tx)?;
 
+                        let mut evm_state = evm_state;
+
+                        let mut pending_balance_increments = state.pending_increments().clone();
+                        for (addr, pending_increment) in state.pending_increments().iter() {
+                            // If the evm_state has this account, move it there and remove from pending_balance_increments
+                            if let Some(account) = evm_state.get_mut(addr) {
+                                pending_balance_increments.remove(addr);
+                                account.info.balance = account.info.balance.saturating_add(*pending_increment);
+                                account.mark_touch();
+                            }
+                        }
+
                         let state_with_increments = StateWithIncrements {
                             loaded_state: evm_state,
-                            pending_balance_increments: state.pending_increments(),
+                            pending_balance_increments,
                         };
 
                         // evm is dropped here, releasing the borrow on state

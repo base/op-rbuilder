@@ -155,9 +155,19 @@ pub enum ReadResult {
 
 #[derive(Debug, Clone)]
 pub enum ReadCumulativeResult {
-    Value { value: U256, version: Version },
+    /// Cumulative value resolved from a Balance write plus increments
+    Value {
+        value: U256,
+        contributing_versions: Vec<Version>,
+    },
+    /// A previous transaction was aborted
     Aborted { txn_idx: TxnIndex },
-    NotFound { increment_total: U256 },
+    /// No Balance write found - value should be read from base state plus increments.
+    /// contributing_versions contains the BalanceIncrement versions that were traversed.
+    NotFound {
+        increment_total: U256,
+        contributing_versions: Vec<Version>,
+    },
 }
 
 /// Represents a read operation recorded during transaction execution.

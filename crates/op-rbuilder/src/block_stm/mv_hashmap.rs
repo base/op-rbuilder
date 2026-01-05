@@ -21,7 +21,7 @@ use tracing::info;
 
 pub type WriteSet = HashSet<(EvmStateKey, EvmStateValue)>;
 
-pub type ReadSet = HashSet<(EvmStateKey, Option<Version>)>;
+pub type ReadSet = HashMap<EvmStateKey, Vec<Version>>;
 
 /// Validation result with conflict details.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +29,8 @@ pub enum ValidationResult {
     Valid,
     Conflict {
         key: EvmStateKey,
-        expected_version: Option<Version>,
-        actual_version: Option<Version>,
+        expected_versions: Vec<Version>,
+        actual_versions: Vec<Version>,
     },
 }
 
@@ -61,7 +61,7 @@ impl MVHashMap {
         let last_written_locations = std::iter::repeat_with(|| RwLock::new(HashSet::new()))
             .take(num_txns)
             .collect();
-        let last_read_set = std::iter::repeat_with(|| RwLock::new(HashSet::new()))
+        let last_read_set = std::iter::repeat_with(|| RwLock::new(HashMap::new()))
             .take(num_txns)
             .collect();
 
@@ -145,10 +145,14 @@ impl MVHashMap {
         location: &EvmStateKey,
         reader_idx: TxnIndex,
     ) -> ReadCumulativeResult {
-        // same as read, but if a BalanceIncrement is found, add it to a cumulative total, and find the previous value until we hit the first write that isn't a BalanceIncrement
+        // Same as read, but if a BalanceIncrement is found, add it to a cumulative total,
+        // and find the previous value until we hit the first write that isn't a BalanceIncrement.
+        // Track all contributing versions for validation.
         let mut cumulative_total = U256::ZERO;
+        let mut contributing_versions = Vec::new();
         let mut current_version = reader_idx;
-        while current_version > 0 {
+
+        loop {
             let read_result = self.read(location, current_version);
             info!(
                 "Read result for address {:?}, txn_idx={}: {:?}",
@@ -157,14 +161,16 @@ impl MVHashMap {
             match read_result {
                 ReadResult::Value { value, version } => {
                     if let EvmStateValue::BalanceIncrement(increment) = value {
-                        // continue to the previous version
+                        // Track this increment version and continue to previous
+                        contributing_versions.push(version);
                         cumulative_total += increment;
                         current_version = version.txn_idx;
                     } else if let EvmStateValue::Balance(balance) = value {
-                        // we hit a balance write, so return the cumulative total
+                        // Hit a balance write - include it in contributing versions
+                        contributing_versions.push(version);
                         return ReadCumulativeResult::Value {
                             value: balance + cumulative_total,
-                            version,
+                            contributing_versions,
                         };
                     } else {
                         panic!(
@@ -177,15 +183,13 @@ impl MVHashMap {
                     return ReadCumulativeResult::Aborted { txn_idx };
                 }
                 ReadResult::NotFound => {
-                    // this tx read from the base state
+                    // Read from base state - include versions from increments we traversed
                     return ReadCumulativeResult::NotFound {
                         increment_total: cumulative_total,
+                        contributing_versions,
                     };
                 }
             }
-        }
-        ReadCumulativeResult::NotFound {
-            increment_total: cumulative_total,
         }
     }
 
@@ -213,38 +217,12 @@ impl MVHashMap {
         }
     }
 
-    pub fn validate_read_set(&self, txn_idx: TxnIndex) -> bool {
-        let prior_reads = self.last_read_set[txn_idx as usize].read();
-        for (location, version) in prior_reads.iter() {
-            let cur_read = self.read(location, txn_idx);
-            match cur_read {
-                ReadResult::Aborted { .. } => return false,
-                ReadResult::NotFound if version.is_some() => return false,
-                ReadResult::Value {
-                    version: read_version,
-                    value,
-                } => {
-                    if let EvmStateValue::BalanceIncrement(_) = value {
-                        // balance increments are always invalid - we should keep re-executing until we have ReadCumulativeResult::NotFound which gives us a balance offset from the base state or a Balance write
-                        info!(
-                            "read set invalid due to balance increment in read set - must be resolved to either a Balance write or the base state"
-                        );
-                        return false;
-                    }
-                    if Some(read_version) != *version {
-                        return false;
-                    }
-                }
-                _ => continue,
-            }
-        }
-        true
-    }
-
     /// Validate read set and return detailed conflict information if validation fails.
+    /// Compares the current state against the recorded versions for each key.
+    /// For cumulative reads (e.g., balance increments), compares all contributing versions.
     pub fn validate_read_set_detailed(&self, txn_idx: TxnIndex) -> ValidationResult {
         let prior_reads = self.last_read_set[txn_idx as usize].read();
-        for (location, version) in prior_reads.iter() {
+        for (location, expected_versions) in prior_reads.iter() {
             let cur_read = self.read(location, txn_idx);
             match cur_read {
                 ReadResult::Aborted {
@@ -252,15 +230,16 @@ impl MVHashMap {
                 } => {
                     return ValidationResult::Conflict {
                         key: location.clone(),
-                        expected_version: *version,
-                        actual_version: Some(Version::new(aborted_txn, 0)),
+                        expected_versions: expected_versions.clone(),
+                        actual_versions: vec![Version::new(aborted_txn, 0)],
                     };
                 }
-                ReadResult::NotFound if version.is_some() => {
+                ReadResult::NotFound if !expected_versions.is_empty() => {
+                    // Expected some versions but found nothing
                     return ValidationResult::Conflict {
                         key: location.clone(),
-                        expected_version: *version,
-                        actual_version: None,
+                        expected_versions: expected_versions.clone(),
+                        actual_versions: vec![],
                     };
                 }
                 ReadResult::Value {
@@ -268,45 +247,51 @@ impl MVHashMap {
                     value,
                 } => {
                     if let EvmStateValue::BalanceIncrement(_) = value {
-                        // if the read returns a balance increment, we should call read_cumulative_balance to get the actual value that the tx was read from
+                        // For balance increments, use read_cumulative_balance to get all contributing versions
                         let cumulative_result = self.read_cumulative_balance(location, txn_idx);
                         match cumulative_result {
                             ReadCumulativeResult::Value {
-                                version: read_version,
+                                contributing_versions,
                                 ..
                             } => {
-                                if Some(read_version) != *version {
+                                if contributing_versions != *expected_versions {
                                     return ValidationResult::Conflict {
                                         key: location.clone(),
-                                        expected_version: *version,
-                                        actual_version: Some(read_version),
+                                        expected_versions: expected_versions.clone(),
+                                        actual_versions: contributing_versions,
                                     };
                                 }
                                 continue;
                             }
-                            ReadCumulativeResult::NotFound { .. } => {
-                                if version.is_some() {
+                            ReadCumulativeResult::NotFound {
+                                contributing_versions,
+                                ..
+                            } => {
+                                if contributing_versions != *expected_versions {
                                     return ValidationResult::Conflict {
                                         key: location.clone(),
-                                        expected_version: *version,
-                                        actual_version: None,
+                                        expected_versions: expected_versions.clone(),
+                                        actual_versions: contributing_versions,
                                     };
                                 }
+                                continue;
                             }
                             ReadCumulativeResult::Aborted { txn_idx } => {
                                 return ValidationResult::Conflict {
                                     key: location.clone(),
-                                    expected_version: *version,
-                                    actual_version: Some(Version::new(txn_idx, 0)),
+                                    expected_versions: expected_versions.clone(),
+                                    actual_versions: vec![Version::new(txn_idx, 0)],
                                 };
                             }
                         }
                     }
-                    if Some(read_version) != *version {
+                    // For single-value reads, compare the single version
+                    let actual_versions = vec![read_version];
+                    if actual_versions != *expected_versions {
                         return ValidationResult::Conflict {
                             key: location.clone(),
-                            expected_version: *version,
-                            actual_version: Some(read_version),
+                            expected_versions: expected_versions.clone(),
+                            actual_versions,
                         };
                     }
                 }
@@ -454,11 +439,14 @@ mod tests {
 
         // Tx 1 reads from tx 0's write
         let mut rs1 = ReadSet::new();
-        rs1.insert((key.clone(), Some(Version::new(0, 0))));
+        rs1.insert(key.clone(), vec![Version::new(0, 0)]);
         mv.record(Version::new(1, 0), &rs1, &WriteSet::new());
 
         // Validation should pass
-        assert!(mv.validate_read_set(1));
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Valid
+        ));
 
         // Now tx 0 re-executes with incarnation 1 and writes different value
         let mut ws0_new = WriteSet::new();
@@ -466,7 +454,10 @@ mod tests {
         mv.record(Version::new(0, 1), &ReadSet::new(), &ws0_new);
 
         // Tx 1's validation should fail (version changed from (0,0) to (0,1))
-        assert!(!mv.validate_read_set(1));
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Conflict { .. }
+        ));
     }
 
     #[test]
@@ -481,14 +472,17 @@ mod tests {
 
         // Tx 1 reads from tx 0
         let mut rs1 = ReadSet::new();
-        rs1.insert((key.clone(), Some(Version::new(0, 0))));
+        rs1.insert(key.clone(), vec![Version::new(0, 0)]);
         mv.record(Version::new(1, 0), &rs1, &WriteSet::new());
 
         // Convert tx 0 to estimate (abort)
         mv.convert_writes_to_estimates(0);
 
         // Tx 1's validation should fail
-        assert!(!mv.validate_read_set(1));
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Conflict { .. }
+        ));
     }
 
     #[test]
@@ -545,7 +539,10 @@ mod tests {
         // All validations should pass (no conflicts)
         for i in 0..num_txns {
             assert!(
-                mv.validate_read_set(i as u32),
+                matches!(
+                    mv.validate_read_set_detailed(i as u32),
+                    ValidationResult::Valid
+                ),
                 "Validation failed for tx {}",
                 i
             );
@@ -690,11 +687,14 @@ mod tests {
 
         // Tx 5 reads from tx 4
         let mut rs5 = ReadSet::new();
-        rs5.insert((shared_key.clone(), Some(Version::new(4, 0))));
+        rs5.insert(shared_key.clone(), vec![Version::new(4, 0)]);
         *mv.last_read_set[5].write() = rs5;
 
         // Validation should pass
-        assert!(mv.validate_read_set(5));
+        assert!(matches!(
+            mv.validate_read_set_detailed(5),
+            ValidationResult::Valid
+        ));
 
         // Now tx 4 re-executes with incarnation 1
         let mut ws4 = WriteSet::new();
@@ -702,15 +702,21 @@ mod tests {
         mv.record(Version::new(4, 1), &ReadSet::new(), &ws4);
 
         // Tx 5's validation should fail (dependency changed)
-        assert!(!mv.validate_read_set(5));
+        assert!(matches!(
+            mv.validate_read_set_detailed(5),
+            ValidationResult::Conflict { .. }
+        ));
 
         // Update tx 5's read set to reflect new version
         let mut rs5_updated = ReadSet::new();
-        rs5_updated.insert((shared_key.clone(), Some(Version::new(4, 1))));
+        rs5_updated.insert(shared_key.clone(), vec![Version::new(4, 1)]);
         *mv.last_read_set[5].write() = rs5_updated;
 
         // Now validation should pass
-        assert!(mv.validate_read_set(5));
+        assert!(matches!(
+            mv.validate_read_set_detailed(5),
+            ValidationResult::Valid
+        ));
     }
 
     #[test]
@@ -812,11 +818,14 @@ mod tests {
 
         // Tx 1 reads the balance (sees tx 0's write)
         let mut rs1 = ReadSet::new();
-        rs1.insert((key.clone(), Some(Version::new(0, 0))));
+        rs1.insert(key.clone(), vec![Version::new(0, 0)]);
         mv.record(Version::new(1, 0), &rs1, &WriteSet::new());
 
         // Validation should pass initially
-        assert!(mv.validate_read_set(1));
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Valid
+        ));
 
         // Now tx 0 re-executes and writes a balance increment instead
         let mut ws0_new = WriteSet::new();
@@ -824,7 +833,10 @@ mod tests {
         mv.record(Version::new(0, 1), &ReadSet::new(), &ws0_new);
 
         // Tx 1's validation should fail (version changed from (0,0) to (0,1))
-        assert!(!mv.validate_read_set(1));
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Conflict { .. }
+        ));
     }
 
     #[test]
@@ -846,7 +858,10 @@ mod tests {
         // All validations should pass (no reads to conflict with)
         for i in 0..4 {
             assert!(
-                mv.validate_read_set(i as u32),
+                matches!(
+                    mv.validate_read_set_detailed(i as u32),
+                    ValidationResult::Valid
+                ),
                 "Tx {} should validate (blind write)",
                 i
             );
@@ -863,14 +878,16 @@ mod tests {
         ws0.insert((key.clone(), make_balance_value(1000)));
         mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
 
-        // Tx 2 reads the balance from base state (NotFound, since tx 0 hasn't been seen yet)
-        // Then tx 1 writes a balance increment
+        // Tx 2 reads the balance from tx 0
         let mut rs2 = ReadSet::new();
-        rs2.insert((key.clone(), Some(Version::new(0, 0))));
+        rs2.insert(key.clone(), vec![Version::new(0, 0)]);
         mv.record(Version::new(2, 0), &rs2, &WriteSet::new());
 
         // Initially tx 2 validation passes
-        assert!(mv.validate_read_set(2));
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Valid
+        ));
 
         // Tx 1 writes a balance increment
         let mut ws1 = WriteSet::new();
@@ -878,6 +895,250 @@ mod tests {
         mv.record(Version::new(1, 0), &ReadSet::new(), &ws1);
 
         // Tx 2's validation should now fail because tx 1's write changed the value
-        assert!(!mv.validate_read_set(2));
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Conflict { .. }
+        ));
+    }
+
+    // ==================== CUMULATIVE READ VALIDATION TESTS ====================
+
+    #[test]
+    fn test_cumulative_only_balance_increments() {
+        // Scenario 1: Only BalanceIncrements (no Balance write)
+        // Tx0: BalanceIncrement(100)
+        // Tx1: BalanceIncrement(50)
+        // Tx2: reads balance -> should depend on [tx0, tx1]
+        let mv = MVHashMap::new(4);
+        let key = make_balance_key(1);
+
+        // Tx 0 writes a balance increment
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key.clone(), make_balance_increment(100)));
+        mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx 1 writes a balance increment
+        let mut ws1 = WriteSet::new();
+        ws1.insert((key.clone(), make_balance_increment(50)));
+        mv.record(Version::new(1, 0), &ReadSet::new(), &ws1);
+
+        // Tx 2 reads the cumulative balance - depends on both tx0 and tx1
+        // contributing_versions should be [tx1, tx0] (reverse order as we walk back)
+        let cumulative_result = mv.read_cumulative_balance(&key, 2);
+        match cumulative_result {
+            ReadCumulativeResult::NotFound {
+                increment_total,
+                contributing_versions,
+            } => {
+                assert_eq!(increment_total, U256::from(150));
+                assert_eq!(contributing_versions.len(), 2);
+                assert_eq!(contributing_versions[0].txn_idx, 1);
+                assert_eq!(contributing_versions[1].txn_idx, 0);
+            }
+            _ => panic!(
+                "Expected NotFound with increments, got {:?}",
+                cumulative_result
+            ),
+        }
+
+        // Record tx2's read set with the contributing versions
+        let mut rs2 = ReadSet::new();
+        rs2.insert(key.clone(), vec![Version::new(1, 0), Version::new(0, 0)]);
+        mv.record(Version::new(2, 0), &rs2, &WriteSet::new());
+
+        // Validation should pass
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Valid
+        ));
+
+        // Now tx 1 re-executes with a different increment
+        let mut ws1_new = WriteSet::new();
+        ws1_new.insert((key.clone(), make_balance_increment(75)));
+        mv.record(Version::new(1, 1), &ReadSet::new(), &ws1_new);
+
+        // Tx 2's validation should fail (tx1's version changed)
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn test_cumulative_balance_followed_by_increment() {
+        // Scenario 2: Balance followed by BalanceIncrement
+        // Tx0: Balance(1000)  // absolute write
+        // Tx1: BalanceIncrement(50)
+        // Tx2: reads balance -> should see 1050, contributing_versions = [tx1, tx0]
+        let mv = MVHashMap::new(4);
+        let key = make_balance_key(1);
+
+        // Tx 0 writes an absolute balance
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key.clone(), make_balance_value(1000)));
+        mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx 1 writes a balance increment
+        let mut ws1 = WriteSet::new();
+        ws1.insert((key.clone(), make_balance_increment(50)));
+        mv.record(Version::new(1, 0), &ReadSet::new(), &ws1);
+
+        // Tx 2 reads the cumulative balance
+        let cumulative_result = mv.read_cumulative_balance(&key, 2);
+        match cumulative_result {
+            ReadCumulativeResult::Value {
+                value,
+                contributing_versions,
+            } => {
+                assert_eq!(value, U256::from(1050));
+                assert_eq!(contributing_versions.len(), 2);
+                assert_eq!(contributing_versions[0].txn_idx, 1); // increment
+                assert_eq!(contributing_versions[1].txn_idx, 0); // balance
+            }
+            _ => panic!("Expected Value, got {:?}", cumulative_result),
+        }
+
+        // Record tx2's read set
+        let mut rs2 = ReadSet::new();
+        rs2.insert(key.clone(), vec![Version::new(1, 0), Version::new(0, 0)]);
+        mv.record(Version::new(2, 0), &rs2, &WriteSet::new());
+
+        // Validation should pass
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Valid
+        ));
+
+        // Now tx 0 re-executes with a different balance
+        let mut ws0_new = WriteSet::new();
+        ws0_new.insert((key.clone(), make_balance_value(2000)));
+        mv.record(Version::new(0, 1), &ReadSet::new(), &ws0_new);
+
+        // Tx 2's validation should fail (tx0's version changed)
+        assert!(matches!(
+            mv.validate_read_set_detailed(2),
+            ValidationResult::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn test_cumulative_only_balance_write() {
+        // Scenario 3: Only Balance write (no increments)
+        // Tx0: Balance(1000)  // absolute write
+        // Tx1: reads balance -> should see 1000, contributing_versions = [tx0]
+        let mv = MVHashMap::new(3);
+        let key = make_balance_key(1);
+
+        // Tx 0 writes an absolute balance
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key.clone(), make_balance_value(1000)));
+        mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx 1 reads - should get the balance directly (not via cumulative)
+        // But let's verify read_cumulative_balance also works
+        let cumulative_result = mv.read_cumulative_balance(&key, 1);
+        match cumulative_result {
+            ReadCumulativeResult::Value {
+                value,
+                contributing_versions,
+            } => {
+                assert_eq!(value, U256::from(1000));
+                assert_eq!(contributing_versions.len(), 1);
+                assert_eq!(contributing_versions[0].txn_idx, 0);
+            }
+            _ => panic!("Expected Value, got {:?}", cumulative_result),
+        }
+
+        // Record tx1's read set with single version
+        let mut rs1 = ReadSet::new();
+        rs1.insert(key.clone(), vec![Version::new(0, 0)]);
+        mv.record(Version::new(1, 0), &rs1, &WriteSet::new());
+
+        // Validation should pass
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Valid
+        ));
+
+        // Re-execute tx0 with different value
+        let mut ws0_new = WriteSet::new();
+        ws0_new.insert((key.clone(), make_balance_value(2000)));
+        mv.record(Version::new(0, 1), &ReadSet::new(), &ws0_new);
+
+        // Tx 1's validation should fail
+        assert!(matches!(
+            mv.validate_read_set_detailed(1),
+            ValidationResult::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn test_cumulative_base_state_read() {
+        // Scenario 4: Base state read (no writes)
+        // Tx0: reads balance -> should read from base state, contributing_versions = []
+        let mv = MVHashMap::new(2);
+        let key = make_balance_key(1);
+
+        // Tx 0 reads - no writes exist, so this is a base state read
+        let cumulative_result = mv.read_cumulative_balance(&key, 0);
+        match cumulative_result {
+            ReadCumulativeResult::NotFound {
+                increment_total,
+                contributing_versions,
+            } => {
+                assert_eq!(increment_total, U256::ZERO);
+                assert!(contributing_versions.is_empty());
+            }
+            _ => panic!(
+                "Expected NotFound with empty versions, got {:?}",
+                cumulative_result
+            ),
+        }
+
+        // Record tx0's read set with empty versions (base state)
+        let mut rs0 = ReadSet::new();
+        rs0.insert(key.clone(), vec![]);
+        mv.record(Version::new(0, 0), &rs0, &WriteSet::new());
+
+        // Validation should pass
+        assert!(matches!(
+            mv.validate_read_set_detailed(0),
+            ValidationResult::Valid
+        ));
+
+        // Now another tx writes a balance increment BEFORE tx0's read
+        // This shouldn't affect tx0's validation since tx0 is at index 0
+        // But if tx1 (index 1) reads after writes from tx0...
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key.clone(), make_balance_increment(100)));
+        mv.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx0's validation should now fail because we overwrote with a write
+        // and our read set expected empty versions
+        // Actually tx0 reads at index 0, so it can't see its own writes
+        // Let's add a tx1 that reads from base state initially
+        let mv2 = MVHashMap::new(3);
+
+        // Tx1 reads from base state initially (no writes)
+        let mut rs1 = ReadSet::new();
+        rs1.insert(key.clone(), vec![]);
+        mv2.record(Version::new(1, 0), &rs1, &WriteSet::new());
+
+        // Validation should pass
+        assert!(matches!(
+            mv2.validate_read_set_detailed(1),
+            ValidationResult::Valid
+        ));
+
+        // Now tx0 writes a balance
+        let mut ws0 = WriteSet::new();
+        ws0.insert((key.clone(), make_balance_value(500)));
+        mv2.record(Version::new(0, 0), &ReadSet::new(), &ws0);
+
+        // Tx1's validation should fail because a write appeared before it
+        assert!(matches!(
+            mv2.validate_read_set_detailed(1),
+            ValidationResult::Conflict { .. }
+        ));
     }
 }

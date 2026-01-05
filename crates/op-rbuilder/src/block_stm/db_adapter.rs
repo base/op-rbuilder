@@ -127,8 +127,8 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
         std::mem::take(&mut self.captured_reads)
     }
 
-    fn add_to_reads(&mut self, key: EvmStateKey, value: EvmStateValue, version: Option<Version>) {
-        self.read_set.insert((key.clone(), version));
+    fn add_to_reads(&mut self, key: EvmStateKey, value: EvmStateValue, versions: Vec<Version>) {
+        self.read_set.insert(key.clone(), versions);
         self.captured_reads.insert(key, value);
     }
 
@@ -146,12 +146,12 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
                 value: EvmStateValue::BlockResourceUsed(val),
                 version,
             } => {
-                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(val), Some(version));
+                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(val), vec![version]);
                 Ok(val)
             }
             ReadResult::NotFound => {
                 // Resource not written yet, defaults to 0
-                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), None);
+                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), vec![]);
                 Ok(0)
             }
             ReadResult::Aborted { txn_idx } => Err(VersionedDbError::ReadAborted {
@@ -195,12 +195,12 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
                 value: EvmStateValue::AddressGasUsed(val),
                 version,
             } => {
-                self.add_to_reads(key, EvmStateValue::AddressGasUsed(val), Some(version));
+                self.add_to_reads(key, EvmStateValue::AddressGasUsed(val), vec![version]);
                 Ok(val)
             }
             ReadResult::NotFound => {
                 // No gas used yet for this address in this block
-                self.add_to_reads(key, EvmStateValue::AddressGasUsed(0), None);
+                self.add_to_reads(key, EvmStateValue::AddressGasUsed(0), vec![]);
                 Ok(0)
             }
             ReadResult::Aborted { txn_idx } => Err(VersionedDbError::ReadAborted {
@@ -349,13 +349,13 @@ where
             self.add_to_reads(
                 balance_key,
                 EvmStateValue::Balance(b),
-                Some(balance_version),
+                vec![balance_version],
             );
-            self.add_to_reads(nonce_key, EvmStateValue::Nonce(n), Some(nonce_version));
+            self.add_to_reads(nonce_key, EvmStateValue::Nonce(n), vec![nonce_version]);
             self.add_to_reads(
                 code_hash_key,
                 EvmStateValue::CodeHash(h),
-                Some(code_hash_version),
+                vec![code_hash_version],
             );
             Ok(Some(AccountInfo {
                 balance: b,
@@ -378,7 +378,7 @@ where
                     value: EvmStateValue::Balance(value),
                     version,
                 } => {
-                    self.add_to_reads(balance_key, EvmStateValue::Balance(value), Some(version));
+                    self.add_to_reads(balance_key, EvmStateValue::Balance(value), vec![version]);
                     base_info.balance = value;
                     did_exist = true;
                 }
@@ -403,11 +403,14 @@ where
                         address, cumulative_result
                     );
                     match cumulative_result {
-                        ReadCumulativeResult::Value { value, version } => {
+                        ReadCumulativeResult::Value {
+                            value,
+                            contributing_versions,
+                        } => {
                             self.add_to_reads(
                                 balance_key,
                                 EvmStateValue::Balance(value),
-                                Some(version),
+                                contributing_versions,
                             );
                             base_info.balance = value;
                         }
@@ -416,13 +419,24 @@ where
                                 aborted_txn_idx: txn_idx,
                             });
                         }
-                        ReadCumulativeResult::NotFound { increment_total } => {
+                        ReadCumulativeResult::NotFound {
+                            increment_total,
+                            contributing_versions,
+                        } => {
+                            info!(
+                                "Found NotFound for address {:?}, txn_idx={}, increment_total={}, contributing_versions={:?}, base_info.balance={}",
+                                address,
+                                self.txn_idx,
+                                increment_total,
+                                contributing_versions,
+                                base_info.balance
+                            );
                             // we hit the base state, so add the increment total to the base balance
                             base_info.balance += increment_total;
                             self.add_to_reads(
                                 balance_key,
                                 EvmStateValue::Balance(base_info.balance),
-                                None,
+                                contributing_versions,
                             );
                         }
                     }
@@ -435,7 +449,11 @@ where
                     });
                 }
                 ReadResult::NotFound => {
-                    self.add_to_reads(balance_key, EvmStateValue::Balance(base_info.balance), None);
+                    self.add_to_reads(
+                        balance_key,
+                        EvmStateValue::Balance(base_info.balance),
+                        vec![],
+                    );
                 }
                 ReadResult::Aborted { .. } => {
                     unreachable!();
@@ -447,7 +465,7 @@ where
                     value: EvmStateValue::Nonce(value),
                     version,
                 } => {
-                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(value), Some(version));
+                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(value), vec![version]);
                     base_info.nonce = value;
                     did_exist = true;
                 }
@@ -459,7 +477,7 @@ where
                     });
                 }
                 ReadResult::NotFound => {
-                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(base_info.nonce), None);
+                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(base_info.nonce), vec![]);
                 }
                 ReadResult::Aborted { .. } => {
                     unreachable!();
@@ -471,7 +489,7 @@ where
                     value: EvmStateValue::CodeHash(value),
                     version,
                 } => {
-                    self.add_to_reads(code_hash_key, EvmStateValue::CodeHash(value), Some(version));
+                    self.add_to_reads(code_hash_key, EvmStateValue::CodeHash(value), vec![version]);
                     base_info.code_hash = value;
                     // CRITICAL: Also populate code from cache to match the new code_hash
                     // Without this, AccountInfo has correct code_hash but code=None,
@@ -490,7 +508,7 @@ where
                     self.add_to_reads(
                         code_hash_key,
                         EvmStateValue::CodeHash(base_info.code_hash),
-                        None,
+                        vec![],
                     );
                 }
                 ReadResult::Aborted { .. } => {
@@ -528,7 +546,7 @@ where
                 version,
             } => {
                 self.read_set
-                    .insert((EvmStateKey::Storage(address, slot), Some(version)));
+                    .insert(EvmStateKey::Storage(address, slot), vec![version]);
                 Ok(v)
             }
             ReadResult::Value { value, version } => Err(VersionedDbError::InvalidValue {
@@ -538,7 +556,7 @@ where
             }),
             ReadResult::NotFound => {
                 self.read_set
-                    .insert((EvmStateKey::Storage(address, slot), None));
+                    .insert(EvmStateKey::Storage(address, slot), vec![]);
                 self.base_db
                     .storage_ref(address, slot)
                     .map_err(|e| VersionedDbError::BaseDbError(e.to_string()))
