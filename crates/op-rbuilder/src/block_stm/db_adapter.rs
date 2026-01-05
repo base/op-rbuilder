@@ -154,9 +154,12 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
                 self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), vec![]);
                 Ok(0)
             }
-            ReadResult::Aborted { txn_idx } => Err(VersionedDbError::ReadAborted {
-                aborted_txn_idx: txn_idx,
-            }),
+            ReadResult::Aborted { .. } => {
+                // instead of aborting reads during execution for resources, just treat it as a not found
+                // this will be caught during validation
+                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), vec![]);
+                Ok(0)
+            }
             ReadResult::Value { value, version } => {
                 // Wrong value type - should never happen
                 Err(VersionedDbError::InvalidValue {
