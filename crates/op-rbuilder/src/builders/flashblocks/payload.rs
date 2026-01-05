@@ -691,7 +691,6 @@ where
 
         // Use parallel execution only when parallel_threads > 1
         if ctx.parallel_threads > 1 {
-            // let ctx = ctx.clone().into_lazy_evm();
             ctx.execute_best_transactions_parallel(
                 info,
                 state,
@@ -1004,18 +1003,9 @@ where
 {
     // We use it to preserve state, so we run merge_transitions on transition state at most once
     let untouched_transition_state = state.transition_state.clone();
-
     let state_merge_start_time = Instant::now();
     state.merge_transitions(BundleRetention::Reverts);
     let state_transition_merge_time = state_merge_start_time.elapsed();
-
-    tracing::info!(
-        target: "payload_builder",
-        "build_block AFTER final merge: bundle_state has {} accounts, {} contracts",
-        state.bundle_state.state.len(),
-        state.bundle_state.contracts.len()
-    );
-
     ctx.metrics
         .state_transition_merge_duration
         .record(state_transition_merge_time);
