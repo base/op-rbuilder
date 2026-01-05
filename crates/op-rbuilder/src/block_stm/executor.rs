@@ -105,12 +105,12 @@ impl<
     pub fn execute_single_tx<
         ExecuteTxFn: (Fn(
                 &Recovered<op_alloy_consensus::OpTxEnvelope>,
-                &mut State<LazyDatabaseWrapper<VersionedDatabase<'_, DB>>>,
+                &mut LazyDatabaseWrapper<State<VersionedDatabase<'_, DB>>>,
                 &HashSet<EvmStateKey>,
                 Option<&TxExecutionResult>,
                 u64,
             ) -> Result<
-                ResultAndState<OpHaltReason>,
+                ResultAndState<OpHaltReason, StateWithIncrements>,
                 EVMError<VersionedDbError, OpTransactionError>,
             >) + Send
             + Sync,
@@ -140,11 +140,11 @@ impl<
                 Arc::clone(&self.shared_code_cache),
             );
 
-            // Wrap with LazyDatabaseWrapper to track balance increments (fee payments)
-            let lazy_db = LazyDatabaseWrapper::new(versioned_db);
-
             // Create State wrapper for EVM execution
-            let mut tx_state = State::builder().with_database(lazy_db).build();
+            let tx_state = State::builder().with_database(versioned_db).build();
+
+            // Wrap with LazyDatabaseWrapper to track balance increments (fee payments)
+            let mut tx_state = LazyDatabaseWrapper::new(tx_state);
 
             // Detect conflicting keys for re-executions (incarnation > 0)
             // Conflicting keys are reads whose versions changed since the previous execution
@@ -204,10 +204,11 @@ impl<
                     let mut write_set = WriteSet::new();
 
                     // Extract pending balance increments from LazyDatabaseWrapper
-                    let pending_balance_increments = tx_state.database.pending_increments();
+                    // These are balances that were incremented only and never read otherwise.
+                    let pending_balance_increments = &state.pending_balance_increments;
 
                     // Get read set and captured reads from inner VersionedDatabase
-                    let versioned_db = tx_state.database.inner_mut();
+                    let versioned_db = &mut tx_state.inner_mut().database;
                     let read_set = versioned_db.take_read_set();
                     let captured_reads = versioned_db.take_captured_reads();
 
@@ -221,7 +222,7 @@ impl<
                     // This ensures conflict detection: if another transaction reads these balances,
                     // validation will detect the dependency. Block-STM doesn't validate writes
                     // against writes, so parallel increments (blind writes) don't conflict.
-                    for (addr, delta) in &pending_balance_increments {
+                    for (addr, delta) in pending_balance_increments {
                         write_set.insert((
                             EvmStateKey::Balance(*addr),
                             EvmStateValue::BalanceIncrement(*delta),
@@ -229,7 +230,7 @@ impl<
                     }
 
                     // Add writes only for values that actually changed
-                    for (addr, account) in state.iter() {
+                    for (addr, account) in state.loaded_state.iter() {
                         if account.is_touched() {
                             // Get original values from captured reads (if available)
                             let original_balance = captured_reads.get(&EvmStateKey::Balance(*addr));
@@ -307,11 +308,7 @@ impl<
                         write_set,
                         TxExecutionResult {
                             tx,
-                            state: StateWithIncrements {
-                                loaded_state: state,
-                                // Pass pending increments to resolve_state for application
-                                pending_balance_increments,
-                            },
+                            state,
                             result: Some(result),
                             tx_da_size,
                             miner_fee,
@@ -335,7 +332,7 @@ impl<
                         "Read aborted for transaction"
                     );
 
-                    let read_set = tx_state.database.inner_mut().take_read_set();
+                    let read_set = tx_state.inner_mut().database.take_read_set();
                     return (
                         read_set,
                         Default::default(),
@@ -367,7 +364,7 @@ impl<
                         "Error executing transaction"
                     );
 
-                    let read_set = tx_state.database.inner_mut().take_read_set();
+                    let read_set = tx_state.inner_mut().database.take_read_set();
                     return (
                         read_set,
                         Default::default(),
@@ -391,12 +388,12 @@ impl<
     pub fn execute_transactions_parallel<
         ExecuteTxFn: (Fn(
                 &Recovered<op_alloy_consensus::OpTxEnvelope>,
-                &mut State<LazyDatabaseWrapper<VersionedDatabase<'_, DB>>>,
+                &mut LazyDatabaseWrapper<State<VersionedDatabase<'_, DB>>>,
                 &HashSet<EvmStateKey>,
                 Option<&TxExecutionResult>,
                 u64,
             ) -> Result<
-                ResultAndState<OpHaltReason>,
+                ResultAndState<OpHaltReason, StateWithIncrements>,
                 EVMError<VersionedDbError, OpTransactionError>,
             >) + Send
             + Sync,
@@ -581,13 +578,6 @@ impl<
                 });
             }
         });
-
-        debug!(
-            "All worker threads completed. Scheduler done: {}, Execution idx: {}, Validation idx: {}",
-            this.scheduler.done(),
-            this.scheduler.execution_idx(),
-            this.scheduler.validation_idx()
-        );
     }
 
     pub fn try_into_committed_results(

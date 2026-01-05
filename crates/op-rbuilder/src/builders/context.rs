@@ -46,7 +46,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Span, debug, info, trace, warn};
 
 use crate::{
-    block_stm::{db_adapter::VersionedDbError, evm::OpLazyEvmFactory, executor::Executor},
+    block_stm::{
+        db_adapter::VersionedDbError,
+        evm::{LazyDatabase, OpLazyEvmFactory},
+        executor::{Executor, StateWithIncrements},
+    },
     gas_limiter::AddressGasLimiter,
     metrics::OpRBuilderMetrics,
     primitives::reth::{ExecutionInfo, TxnExecutionResult},
@@ -959,13 +963,13 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
 
                     // 1. Read BlockResourceUsed increments from other txs BEFORE execution to detect conflicts earlier
                     // These are increments from other transactions within this flashblock (not the base from sequencer)
-                    let gas_increment = state.database.inner_mut()
+                    let gas_increment = state.inner_mut().database
                         .read_block_resource(BlockResourceType::Gas)?;
-                    let da_increment = state.database.inner_mut()
+                    let da_increment = state.inner_mut().database
                         .read_block_resource(BlockResourceType::DABytes)?;
 
                     // Read AddressGasUsed for this address to check rate limiting
-                    let address_gas_used = state.database.inner_mut()
+                    let address_gas_used = state.inner_mut().database
                         .read_address_gas_used(tx.signer())?;
 
                     trace!(
@@ -1005,15 +1009,20 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                         trace!(target: "payload_builder", "Skipping EVM re-execution (resource-only conflict)");
                         // Reuse previous result - extract just the loaded_state, not the full StateWithIncrements
                         let prev = previous_result.unwrap();
-                        (prev.result.clone().unwrap(), prev.state.loaded_state.clone())
+                        (prev.result.clone().unwrap(), prev.state.clone())
                     } else {
                         // Run EVM normally
                         let lazy_factory = OpLazyEvmFactory;
                         let mut evm = lazy_factory.create_evm(&mut *state, self.evm_env.clone());
                         let ResultAndState { result, state: evm_state } = evm.transact(tx)?;
 
+                        let state_with_increments = StateWithIncrements {
+                            loaded_state: evm_state,
+                            pending_balance_increments: state.pending_increments(),
+                        };
+
                         // evm is dropped here, releasing the borrow on state
-                        (result, evm_state)
+                        (result, state_with_increments)
                     };
 
                     // 5. Validate limits (pre-resource-write checks)
@@ -1103,15 +1112,15 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                         new_gas_cumulative, new_da_cumulative, new_address_gas_cumulative, gas_increment, tx_gas_used, da_increment, tx_da_size, address_gas_used, tx_gas_used
                     );
 
-                    state.database.inner_mut().write_block_resource(
+                    state.inner_mut().database.write_block_resource(
                         BlockResourceType::Gas,
                         new_gas_cumulative
                     )?;
-                    state.database.inner_mut().write_block_resource(
+                    state.inner_mut().database.write_block_resource(
                         BlockResourceType::DABytes,
                         new_da_cumulative
                     )?;
-                    state.database.inner_mut().write_address_gas_used(
+                    state.inner_mut().database.write_address_gas_used(
                         tx.signer(),
                         new_address_gas_cumulative
                     )?;

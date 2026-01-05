@@ -94,13 +94,6 @@ impl Scheduler {
 
     fn check_done(&self) {
         let observed_cnt = self.decrease_cnt.load(Ordering::SeqCst);
-        debug!(
-            "Execution idx: {}\nValidation idx: {}\nNum txns: {}\nNum active tasks: {}",
-            self.execution_idx.load(Ordering::SeqCst),
-            self.validation_idx.load(Ordering::SeqCst),
-            self.num_txns,
-            self.num_active_tasks.load(Ordering::SeqCst)
-        );
         if std::cmp::min(
             self.execution_idx.load(Ordering::SeqCst),
             self.validation_idx.load(Ordering::SeqCst),

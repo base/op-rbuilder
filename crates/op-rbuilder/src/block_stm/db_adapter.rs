@@ -382,19 +382,13 @@ where
                     did_exist = true;
                 }
                 ReadResult::Value {
-                    value: EvmStateValue::BalanceIncrement(increment),
+                    value: EvmStateValue::BalanceIncrement(_),
                     version,
                 } => {
-                    // BalanceIncrement is a delta that should be added to the base balance.
-                    // We read the base balance and add the increment.
-                    // Track dependency on the increment write for conflict detection.
-                    self.add_to_reads(
-                        balance_key.clone(),
-                        EvmStateValue::BalanceIncrement(increment),
-                        Some(version),
-                    );
-                    base_info.balance = base_info.balance.saturating_add(increment);
-                    did_exist = true;
+                    // Reading a balance increment counts as an aborted read since we can't know all previous increments
+                    return Err(VersionedDbError::ReadAborted {
+                        aborted_txn_idx: version.txn_idx,
+                    });
                 }
                 ReadResult::Value { value, version } => {
                     return Err(VersionedDbError::InvalidValue {
