@@ -1,7 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use tracing::debug;
-
 use crate::block_stm::{
     ExecutionStatus, Task, Version,
     types::{Incarnation, TxnIndex},

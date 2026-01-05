@@ -24,7 +24,7 @@ use crate::{
     block_stm::{
         EvmStateKey, EvmStateValue, ExecutionStatus, MVHashMap, Scheduler, SharedCodeCache, Task,
         ValidationResult, Version, VersionedDatabase, VersionedDbError,
-        evm::{LazyDatabase, LazyDatabaseWrapper},
+        evm::LazyDatabaseWrapper,
         mv_hashmap::{ReadSet, WriteSet},
     },
     tx::FBPoolTransaction,
