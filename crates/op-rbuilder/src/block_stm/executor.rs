@@ -213,7 +213,6 @@ impl<
                     // Get read set and captured reads from inner VersionedDatabase
                     let versioned_db = &mut tx_state.inner_mut().database;
                     let read_set = versioned_db.take_read_set();
-                    let captured_reads = versioned_db.take_captured_reads();
 
                     // Add resource writes (gas, DA bytes) to write set
                     // These are written via write_block_resource() during execution
@@ -575,7 +574,7 @@ impl<
                             // Get next task from Block-STM scheduler
                             task = this.scheduler.next_task();
                             if task.is_none() {
-                                std::thread::yield_now();
+                                std::thread::sleep(std::time::Duration::from_millis(5));
                             }
                         }
                     }

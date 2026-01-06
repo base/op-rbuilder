@@ -88,8 +88,6 @@ pub struct VersionedDatabase<'a, BaseDB> {
     code_cache: SharedCodeCache,
     /// Read set for dependency tracking
     read_set: ReadSet,
-    /// Captured reads for change tracking
-    captured_reads: HashMap<EvmStateKey, EvmStateValue>,
     /// Captured writes for block resources (gas, DA bytes)
     pub captured_writes: HashMap<EvmStateKey, EvmStateValue>,
 }
@@ -108,7 +106,6 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
             base_db,
             code_cache,
             read_set: ReadSet::new(),
-            captured_reads: HashMap::default(),
             captured_writes: HashMap::default(),
         }
     }
@@ -123,13 +120,8 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
         std::mem::take(&mut self.read_set)
     }
 
-    pub fn take_captured_reads(&mut self) -> HashMap<EvmStateKey, EvmStateValue> {
-        std::mem::take(&mut self.captured_reads)
-    }
-
-    fn add_to_reads(&mut self, key: EvmStateKey, value: EvmStateValue, versions: Vec<Version>) {
+    fn add_to_reads(&mut self, key: EvmStateKey, versions: Vec<Version>) {
         self.read_set.insert(key.clone(), versions);
-        self.captured_reads.insert(key, value);
     }
 
     /// Read a block resource value from MVHashMap.
@@ -146,18 +138,18 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
                 value: EvmStateValue::BlockResourceUsed(val),
                 version,
             } => {
-                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(val), vec![version]);
+                self.add_to_reads(key, vec![version]);
                 Ok(val)
             }
             ReadResult::NotFound => {
                 // Resource not written yet, defaults to 0
-                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), vec![]);
+                self.add_to_reads(key, vec![]);
                 Ok(0)
             }
             ReadResult::Aborted { .. } => {
                 // instead of aborting reads during execution for resources, just treat it as a not found
                 // this will be caught during validation
-                self.add_to_reads(key, EvmStateValue::BlockResourceUsed(0), vec![]);
+                self.add_to_reads(key, vec![]);
                 Ok(0)
             }
             ReadResult::Value { value, version } => {
@@ -198,12 +190,12 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
                 value: EvmStateValue::AddressGasUsed(val),
                 version,
             } => {
-                self.add_to_reads(key, EvmStateValue::AddressGasUsed(val), vec![version]);
+                self.add_to_reads(key, vec![version]);
                 Ok(val)
             }
             ReadResult::NotFound => {
                 // No gas used yet for this address in this block
-                self.add_to_reads(key, EvmStateValue::AddressGasUsed(0), vec![]);
+                self.add_to_reads(key, vec![]);
                 Ok(0)
             }
             ReadResult::Aborted { txn_idx } => Err(VersionedDbError::ReadAborted {
@@ -235,55 +227,6 @@ impl<'a, BaseDB> VersionedDatabase<'a, BaseDB> {
             .insert(key, EvmStateValue::AddressGasUsed(value));
         Ok(())
     }
-
-    // /// Record a resolved balance read (balance with deltas applied).
-    // fn record_resolved_balance(
-    //     &self,
-    //     address: Address,
-    //     resolved: crate::block_stm::types::ResolvedBalance,
-    // ) {
-    //     self.captured_reads
-    //         .lock()
-    //         .unwrap()
-    //         .capture_resolved_balance(address, resolved);
-    // }
-
-    // /// Resolve a balance including any pending deltas.
-    // ///
-    // /// This handles the case where earlier transactions have written balance deltas
-    // /// (e.g., fee increments) that need to be applied to the balance.
-    // #[instrument(level = "trace", skip(self), fields(txn_idx = self.txn_idx, address = %address))]
-    // fn resolve_balance_with_deltas(
-    //     &self,
-    //     address: Address,
-    //     base_value: U256,
-    //     base_version: Option<Version>,
-    // ) -> Result<U256, VersionedDbError> {
-    //     // Check if there are pending deltas for this address
-    //     if !self.mv_hashmap.has_pending_deltas(&address, self.txn_idx) {
-    //         // No deltas, just return the base value (already recorded)
-    //         return Ok(base_value);
-    //     }
-
-    //     // Resolve deltas
-    //     match self
-    //         .mv_hashmap
-    //         .resolve_balance(address, self.txn_idx, base_value, base_version)
-    //     {
-    //         Ok(resolved) => {
-    //             let final_value = resolved.resolved_value;
-
-    //             // Record the resolved balance read (tracks all contributors)
-    //             self.record_resolved_balance(address, resolved);
-
-    //             Ok(final_value)
-    //         }
-    //         Err(aborted_txn_idx) => {
-    //             self.mark_aborted(aborted_txn_idx);
-    //             Err(VersionedDbError::ReadAborted { aborted_txn_idx })
-    //         }
-    //     }
-    // }
 }
 
 impl<'a, BaseDB> Database for VersionedDatabase<'a, BaseDB>
@@ -349,17 +292,9 @@ where
             },
         ) = (&balance_result, &nonce_result, &code_hash_result)
         {
-            self.add_to_reads(
-                balance_key,
-                EvmStateValue::Balance(b),
-                vec![balance_version],
-            );
-            self.add_to_reads(nonce_key, EvmStateValue::Nonce(n), vec![nonce_version]);
-            self.add_to_reads(
-                code_hash_key,
-                EvmStateValue::CodeHash(h),
-                vec![code_hash_version],
-            );
+            self.add_to_reads(balance_key, vec![balance_version]);
+            self.add_to_reads(nonce_key, vec![nonce_version]);
+            self.add_to_reads(code_hash_key, vec![code_hash_version]);
             Ok(Some(AccountInfo {
                 balance: b,
                 nonce: n,
@@ -381,7 +316,7 @@ where
                     value: EvmStateValue::Balance(value),
                     version,
                 } => {
-                    self.add_to_reads(balance_key, EvmStateValue::Balance(value), vec![version]);
+                    self.add_to_reads(balance_key, vec![version]);
                     base_info.balance = value;
                     did_exist = true;
                 }
@@ -410,11 +345,7 @@ where
                             value,
                             contributing_versions,
                         } => {
-                            self.add_to_reads(
-                                balance_key,
-                                EvmStateValue::Balance(value),
-                                contributing_versions,
-                            );
+                            self.add_to_reads(balance_key, contributing_versions);
                             base_info.balance = value;
                         }
                         ReadCumulativeResult::Aborted { txn_idx } => {
@@ -436,11 +367,7 @@ where
                             );
                             // we hit the base state, so add the increment total to the base balance
                             base_info.balance += increment_total;
-                            self.add_to_reads(
-                                balance_key,
-                                EvmStateValue::Balance(base_info.balance),
-                                contributing_versions,
-                            );
+                            self.add_to_reads(balance_key, contributing_versions);
                         }
                     }
                 }
@@ -452,11 +379,7 @@ where
                     });
                 }
                 ReadResult::NotFound => {
-                    self.add_to_reads(
-                        balance_key,
-                        EvmStateValue::Balance(base_info.balance),
-                        vec![],
-                    );
+                    self.add_to_reads(balance_key, vec![]);
                 }
                 ReadResult::Aborted { .. } => {
                     unreachable!();
@@ -468,7 +391,7 @@ where
                     value: EvmStateValue::Nonce(value),
                     version,
                 } => {
-                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(value), vec![version]);
+                    self.add_to_reads(nonce_key, vec![version]);
                     base_info.nonce = value;
                     did_exist = true;
                 }
@@ -480,7 +403,7 @@ where
                     });
                 }
                 ReadResult::NotFound => {
-                    self.add_to_reads(nonce_key, EvmStateValue::Nonce(base_info.nonce), vec![]);
+                    self.add_to_reads(nonce_key, vec![]);
                 }
                 ReadResult::Aborted { .. } => {
                     unreachable!();
@@ -492,7 +415,7 @@ where
                     value: EvmStateValue::CodeHash(value),
                     version,
                 } => {
-                    self.add_to_reads(code_hash_key, EvmStateValue::CodeHash(value), vec![version]);
+                    self.add_to_reads(code_hash_key, vec![version]);
                     base_info.code_hash = value;
                     // CRITICAL: Also populate code from cache to match the new code_hash
                     // Without this, AccountInfo has correct code_hash but code=None,
@@ -508,11 +431,7 @@ where
                     });
                 }
                 ReadResult::NotFound => {
-                    self.add_to_reads(
-                        code_hash_key,
-                        EvmStateValue::CodeHash(base_info.code_hash),
-                        vec![],
-                    );
+                    self.add_to_reads(code_hash_key, vec![]);
                 }
                 ReadResult::Aborted { .. } => {
                     unreachable!();
