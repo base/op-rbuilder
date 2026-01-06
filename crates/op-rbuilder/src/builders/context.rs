@@ -621,16 +621,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
             };
             info.receipts.push(self.build_receipt(ctx, None));
 
-            // Log state before commit (sequential mode)
-            trace!(
-                target: "payload_builder",
-                mode = "sequential",
-                txn_idx,
-                num_accounts = state.len(),
-                has_storage_count = state.iter().filter(|(_, a)| !a.storage.is_empty()).count(),
-                "SEQUENTIAL: Before commit"
-            );
-
             // commit changes
             evm.db_mut().commit(state);
 
@@ -974,19 +964,12 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                         && previous_result.map(|r| r.result.is_some()).unwrap_or(false);
 
                     if !conflicting_keys.is_empty() {
-                        trace!(
-                            target: "payload_builder",
-                            conflict_keys_count = conflicting_keys.len(),
-                            resource_only = conflicts_are_resource_only,
-                            has_previous = previous_result.is_some(),
-                            skip_evm = can_skip_evm,
-                            "Block-STM conflict check"
-                        );
+                        debug!(target: "payload_builder", "Conflicting keys: {:?}", conflicting_keys.iter().collect::<Vec<_>>());
                     }
 
                     // 3. Execute or reuse
                     let (result, evm_state) = if can_skip_evm {
-                        trace!(target: "payload_builder", "Skipping EVM re-execution (resource-only conflict)");
+                        debug!(target: "payload_builder", "Skipping EVM re-execution (resource-only conflict)");
                         // Reuse previous result - extract just the loaded_state, not the full StateWithIncrements
                         let prev = previous_result.unwrap();
                         (prev.result.clone().unwrap(), prev.state.clone())
@@ -1062,12 +1045,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                     if let Some(da_footprint_gas_scalar) = da_footprint_gas_scalar {
                         let total_da_bytes_after = cumulative_da_bytes.saturating_add(tx_da_size);
                         let da_footprint_after = total_da_bytes_after.saturating_mul(da_footprint_gas_scalar as u64);
-                        trace!(
-                            target: "payload_builder",
-                            "DA footprint check: total_da_bytes={}, scalar={}, footprint={}, limit={}",
-                            total_da_bytes_after, da_footprint_gas_scalar, da_footprint_after,
-                            block_da_footprint_limit.unwrap_or(block_gas_limit)
-                        );
                         if da_footprint_after > block_da_footprint_limit.unwrap_or(block_gas_limit) {
                             return Err(EVMError::Database(VersionedDbError::BaseDbError(
                                 format!("Block DA footprint limit exceeded: {} > {} (total_da_bytes={}, base={}, da_increment={}, tx_da={}, scalar={})",
@@ -1113,12 +1090,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                     let new_gas_cumulative = gas_increment + tx_gas_used;
                     let new_da_cumulative = da_increment + tx_da_size;
                     let new_address_gas_cumulative = address_gas_used + tx_gas_used;
-
-                    trace!(
-                        target: "payload_builder",
-                        "Writing increments: new_gas={}, new_da={}, new_address_gas={} (gas_increment={} + tx_gas={}, da_increment={} + tx_da={}, address_gas={} + tx_gas={})",
-                        new_gas_cumulative, new_da_cumulative, new_address_gas_cumulative, gas_increment, tx_gas_used, da_increment, tx_da_size, address_gas_used, tx_gas_used
-                    );
 
                     state.inner_mut().database.write_block_resource(
                         BlockResourceType::Gas,
@@ -1226,41 +1197,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
                 }
             }
 
-            // Commit resolved state to actual DB
-            let num_accounts_with_storage = resolved_state
-                .iter()
-                .filter(|(_, acct)| !acct.storage.is_empty())
-                .count();
-
-            trace!(
-                target: "payload_builder",
-                mode = "parallel",
-                tx_hash = ?tx_result.tx.tx_hash(),
-                num_accounts = resolved_state.len(),
-                num_accounts_with_storage,
-                "PARALLEL: Before commit"
-            );
-
-            if num_accounts_with_storage > 0 {
-                for (addr, account) in resolved_state.iter() {
-                    if !account.storage.is_empty() {
-                        let num_changed = account
-                            .storage
-                            .iter()
-                            .filter(|(_, v)| v.is_changed())
-                            .count();
-                        trace!(
-                            target: "payload_builder",
-                            address = ?addr,
-                            num_storage_slots = account.storage.len(),
-                            num_changed_slots = num_changed,
-                            is_touched = account.is_touched(),
-                            is_selfdestructed = account.is_selfdestructed(),
-                            "Account has storage in resolved_state before commit"
-                        );
-                    }
-                }
-            }
             db.commit(resolved_state);
 
             // Consume gas in address gas limiter now that the transaction is committed
@@ -1426,10 +1362,6 @@ impl<ExtraCtx: Debug + Default> OpPayloadBuilderCtx<ExtraCtx, OpEvmFactory> {
             }
 
             applied_count += 1;
-            trace!(
-                cumulative_gas = info.cumulative_gas_used,
-                "Committed transaction"
-            );
         }
 
         info!(

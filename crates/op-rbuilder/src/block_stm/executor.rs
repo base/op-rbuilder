@@ -15,7 +15,7 @@ use revm::{
     Database, DatabaseRef,
     context::result::{EVMError, ExecutionResult, ResultAndState},
     primitives::HashMap,
-    state::{Account, EvmState},
+    state::{Account, AccountInfo, EvmState},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Span, debug, info};
@@ -239,16 +239,22 @@ impl<
                     // Add writes only for values that actually changed
                     for (addr, account) in state.loaded_state.iter() {
                         if account.is_touched() {
+                            let original_account = self
+                                .base_db
+                                .basic_ref(*addr)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default();
                             // Get original values from captured reads (if available)
-                            let original_balance = captured_reads.get(&EvmStateKey::Balance(*addr));
-                            let original_nonce = captured_reads.get(&EvmStateKey::Nonce(*addr));
-                            let original_code_hash =
-                                captured_reads.get(&EvmStateKey::CodeHash(*addr));
+                            let AccountInfo {
+                                balance: original_balance,
+                                nonce: original_nonce,
+                                code_hash: original_code_hash,
+                                ..
+                            } = original_account;
 
                             // Only write balance if it changed
-                            if original_balance
-                                != Some(&EvmStateValue::Balance(account.info.balance))
-                            {
+                            if original_balance != account.info.balance {
                                 write_set.insert((
                                     EvmStateKey::Balance(*addr),
                                     EvmStateValue::Balance(account.info.balance),
@@ -256,7 +262,7 @@ impl<
                             }
 
                             // Only write nonce if it changed
-                            if original_nonce != Some(&EvmStateValue::Nonce(account.info.nonce)) {
+                            if original_nonce != account.info.nonce {
                                 write_set.insert((
                                     EvmStateKey::Nonce(*addr),
                                     EvmStateValue::Nonce(account.info.nonce),
@@ -264,9 +270,7 @@ impl<
                             }
 
                             // Only write code hash if it changed
-                            if original_code_hash
-                                != Some(&EvmStateValue::CodeHash(account.info.code_hash))
-                            {
+                            if original_code_hash != account.info.code_hash {
                                 write_set.insert((
                                     EvmStateKey::CodeHash(*addr),
                                     EvmStateValue::CodeHash(account.info.code_hash),
