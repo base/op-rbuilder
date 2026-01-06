@@ -1,0 +1,625 @@
+use std::{
+    collections::{HashSet, hash_map::Entry},
+    sync::{Arc, Mutex},
+    thread,
+};
+
+use alloy_consensus::Transaction;
+use alloy_primitives::{Address, U256};
+use op_revm::{OpHaltReason, OpTransactionError};
+use reth_node_api::PayloadBuilderError;
+use reth_optimism_primitives::OpTransactionSigned;
+use reth_primitives::Recovered;
+use reth_revm::State;
+use revm::{
+    Database, DatabaseRef,
+    context::result::{EVMError, ExecutionResult, ResultAndState},
+    primitives::HashMap,
+    state::{Account, AccountInfo, EvmState},
+};
+use tokio_util::sync::CancellationToken;
+use tracing::{Span, debug, info};
+
+use crate::{
+    block_stm::{
+        EvmStateKey, EvmStateValue, ExecutionStatus, MVHashMap, Scheduler, SharedCodeCache, Task,
+        ValidationResult, Version, VersionedDatabase, VersionedDbError,
+        evm::LazyDatabaseWrapper,
+        mv_hashmap::{ReadSet, WriteSet},
+    },
+    tx::FBPoolTransaction,
+};
+
+/// Result of executing a single transaction in parallel.
+/// Stored for deferred commit during the commit phase.
+#[derive(Clone)]
+pub struct TxExecutionResult {
+    /// The transaction that was executed
+    pub tx: Recovered<op_alloy_consensus::OpTxEnvelope>,
+    /// State changes from execution (using alloy's HashMap for compatibility)
+    pub state: StateWithIncrements,
+    pub result: Option<ExecutionResult<OpHaltReason>>,
+    /// DA size
+    pub tx_da_size: u64,
+    pub miner_fee: u128,
+}
+
+#[derive(Clone)]
+pub struct StateWithIncrements {
+    pub loaded_state: EvmState,
+    pub pending_balance_increments: HashMap<Address, U256>,
+}
+
+impl StateWithIncrements {
+    pub fn resolve_state<DB: Database>(self, db: &mut DB) -> Result<EvmState, DB::Error> {
+        let mut state = self.loaded_state;
+        for (addr, delta) in self.pending_balance_increments.iter() {
+            match state.entry(*addr) {
+                Entry::Occupied(mut entry) => {
+                    entry.get_mut().info.balance = entry.get().info.balance.saturating_add(*delta);
+                }
+                Entry::Vacant(entry) => {
+                    let mut account = db.basic(*addr)?.unwrap_or_default();
+                    account.balance = account.balance.saturating_add(*delta);
+                    let mut account: Account = account.into();
+                    account.mark_touch();
+                    entry.insert(account);
+                }
+            }
+        }
+        Ok(state)
+    }
+}
+
+pub struct Executor<
+    Tx: FBPoolTransaction<Consensus = OpTransactionSigned>,
+    DB: Database + DatabaseRef,
+> {
+    execution_results: Arc<Mutex<Vec<Option<TxExecutionResult>>>>,
+    scheduler: Arc<Scheduler>,
+    mv_hashmap: Arc<MVHashMap>,
+    pub shared_code_cache: SharedCodeCache,
+
+    num_threads: usize,
+    transactions: Vec<Tx>,
+    base_db: DB,
+}
+
+impl<
+    Tx: FBPoolTransaction<Consensus = OpTransactionSigned>,
+    DB: Database + DatabaseRef + Send + Sync,
+> Executor<Tx, DB>
+{
+    pub fn new(num_threads: usize, transactions: Vec<Tx>, base_db: DB) -> Self {
+        Executor {
+            num_threads,
+            execution_results: Arc::new(Mutex::new(vec![None; transactions.len()])),
+            scheduler: Arc::new(Scheduler::new(transactions.len())),
+            mv_hashmap: Arc::new(MVHashMap::new(transactions.len())),
+            transactions,
+            shared_code_cache: SharedCodeCache::default(),
+            base_db,
+        }
+    }
+
+    pub fn execute_single_tx<
+        ExecuteTxFn: (Fn(
+                &Recovered<op_alloy_consensus::OpTxEnvelope>,
+                &mut LazyDatabaseWrapper<State<VersionedDatabase<'_, DB>>>,
+                &HashSet<EvmStateKey>,
+                Option<&TxExecutionResult>,
+                u64,
+            ) -> Result<
+                ResultAndState<OpHaltReason, StateWithIncrements>,
+                EVMError<VersionedDbError, OpTransactionError>,
+            >) + Send
+            + Sync,
+    >(
+        &self,
+        version: Version,
+        base_fee: u64,
+        execute_tx: &Arc<ExecuteTxFn>,
+    ) -> (ReadSet, WriteSet, TxExecutionResult, bool) {
+        let Version {
+            txn_idx,
+            incarnation,
+        } = version;
+
+        let pool_tx = &self.transactions[txn_idx as usize];
+        let tx_da_size = pool_tx.estimated_da_size();
+        let tx = pool_tx.clone().into_consensus();
+
+        // Retry loop: if we hit a read abort but the dependency is already satisfied,
+        // we retry immediately instead of blocking. This avoids recursive calls.
+        loop {
+            // Routes reads through MVHashMap, falls back to base state
+            let versioned_db = VersionedDatabase::new(
+                txn_idx,
+                &self.mv_hashmap,
+                &self.base_db,
+                Arc::clone(&self.shared_code_cache),
+            );
+
+            // Create State wrapper for EVM execution
+            let tx_state = State::builder().with_database(versioned_db).build();
+
+            // Wrap with LazyDatabaseWrapper to track balance increments (fee payments)
+            let mut tx_state = LazyDatabaseWrapper::new(tx_state);
+
+            // Detect conflicting keys for re-executions (incarnation > 0)
+            // Conflicting keys are reads whose versions changed since the previous execution
+            let conflicting_keys: HashSet<EvmStateKey> = if incarnation > 0 {
+                let prev_read_set = self.mv_hashmap.get_last_read_set(txn_idx);
+
+                if !prev_read_set.is_empty() {
+                    use crate::block_stm::types::ReadResult;
+
+                    prev_read_set
+                        .iter()
+                        .filter_map(|(key, expected_versions)| {
+                            // Check if this key's current version matches expected
+                            let current_read = self.mv_hashmap.read(key, txn_idx);
+                            match (&expected_versions[..], &current_read) {
+                                // Expected some versions but got a different version
+                                ([expected_ver, ..], ReadResult::Value { version, .. })
+                                    if version != expected_ver =>
+                                {
+                                    Some(key.clone())
+                                }
+                                // Expected base state but found a value
+                                ([], ReadResult::Value { .. }) => Some(key.clone()),
+                                // Expected some version but found nothing
+                                ([_, ..], ReadResult::NotFound) => Some(key.clone()),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                } else {
+                    HashSet::new()
+                }
+            } else {
+                HashSet::new()
+            };
+
+            // Get previous execution result if this is a re-execution
+            // We need to hold the lock guard to keep the reference alive
+            let results_guard = self.execution_results.lock().unwrap()[txn_idx as usize].clone();
+            let previous_result = if incarnation > 0 {
+                results_guard.as_ref()
+            } else {
+                None
+            };
+
+            // Execute transaction with versioned state, conflicting keys, previous result, and tx_da_size
+            let result = execute_tx(
+                &tx,
+                &mut tx_state,
+                &conflicting_keys,
+                previous_result,
+                tx_da_size,
+            );
+
+            match result {
+                Ok(result) => {
+                    let ResultAndState { result, state } = result;
+
+                    // Build write set from state changes
+                    let mut write_set = WriteSet::new();
+
+                    // Extract pending balance increments from LazyDatabaseWrapper
+                    // These are balances that were incremented only and never read otherwise.
+                    let pending_balance_increments = &state.pending_balance_increments;
+
+                    // Get read set and captured reads from inner VersionedDatabase
+                    let versioned_db = &mut tx_state.inner_mut().database;
+                    let read_set = versioned_db.take_read_set();
+
+                    // Add resource writes (gas, DA bytes) to write set
+                    // These are written via write_block_resource() during execution
+                    for (key, value) in std::mem::take(&mut versioned_db.captured_writes) {
+                        write_set.insert((key, value));
+                    }
+
+                    // Add balance increments to write set using BalanceIncrement variant.
+                    // This ensures conflict detection: if another transaction reads these balances,
+                    // validation will detect the dependency. Block-STM doesn't validate writes
+                    // against writes, so parallel increments (blind writes) don't conflict.
+                    for (addr, delta) in pending_balance_increments {
+                        write_set.insert((
+                            EvmStateKey::Balance(*addr),
+                            EvmStateValue::BalanceIncrement(*delta),
+                        ));
+                        info!(
+                            "Added balance increment for address {:?}: {:?}",
+                            addr, delta
+                        );
+                    }
+
+                    // Add writes only for values that actually changed
+                    for (addr, account) in state.loaded_state.iter() {
+                        if account.is_touched() {
+                            let original_account = self
+                                .base_db
+                                .basic_ref(*addr)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default();
+                            // Get original values from captured reads (if available)
+                            let AccountInfo {
+                                balance: original_balance,
+                                nonce: original_nonce,
+                                code_hash: original_code_hash,
+                                ..
+                            } = original_account;
+
+                            // Only write balance if it changed
+                            if original_balance != account.info.balance {
+                                write_set.insert((
+                                    EvmStateKey::Balance(*addr),
+                                    EvmStateValue::Balance(account.info.balance),
+                                ));
+                            }
+
+                            // Only write nonce if it changed
+                            if original_nonce != account.info.nonce {
+                                write_set.insert((
+                                    EvmStateKey::Nonce(*addr),
+                                    EvmStateValue::Nonce(account.info.nonce),
+                                ));
+                            }
+
+                            // Only write code hash if it changed
+                            if original_code_hash != account.info.code_hash {
+                                write_set.insert((
+                                    EvmStateKey::CodeHash(*addr),
+                                    EvmStateValue::CodeHash(account.info.code_hash),
+                                ));
+
+                                // Store bytecode in shared cache for lookup by later transactions
+                                // This is critical: when a contract is deployed, its bytecode must be
+                                // accessible to subsequent transactions via code_by_hash_ref()
+                                if let Some(ref code) = account.info.code {
+                                    self.shared_code_cache
+                                        .insert(account.info.code_hash, code.clone());
+                                }
+                            }
+
+                            // Storage slots already have is_changed() check
+                            for (slot, value) in account.storage.iter() {
+                                if value.is_changed() {
+                                    write_set.insert((
+                                        EvmStateKey::Storage(*addr, *slot),
+                                        EvmStateValue::Storage(value.present_value),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract success and logs from result
+                    let success = result.is_success();
+
+                    if !success {
+                        debug!(
+                            target: "block_stm",
+                            txn_idx = txn_idx,
+                            incarnation = incarnation,
+                            result = ?result,
+                            "Transaction reverted"
+                        );
+                    }
+
+                    let miner_fee = tx
+                        .effective_tip_per_gas(base_fee)
+                        .expect("fee is always valid");
+
+                    return (
+                        read_set,
+                        write_set,
+                        TxExecutionResult {
+                            tx,
+                            state,
+                            result: Some(result),
+                            tx_da_size,
+                            miner_fee,
+                        },
+                        false,
+                    );
+                }
+                Err(EVMError::Database(VersionedDbError::ReadAborted { aborted_txn_idx })) => {
+                    // Try to add dependency. If it returns false, the dependency is already
+                    // satisfied (already executed), so we can retry immediately.
+                    if !self.scheduler.add_dependency(txn_idx, aborted_txn_idx) {
+                        // Retry execution in the loop
+                        continue;
+                    }
+
+                    debug!(
+                        target: "block_stm",
+                        txn_idx = txn_idx,
+                        incarnation = incarnation,
+                        aborted_txn_idx = aborted_txn_idx,
+                        "Read aborted for transaction"
+                    );
+
+                    let read_set = tx_state.inner_mut().database.take_read_set();
+                    return (
+                        read_set,
+                        Default::default(),
+                        TxExecutionResult {
+                            tx,
+                            state: StateWithIncrements {
+                                loaded_state: EvmState::default(),
+                                pending_balance_increments: Default::default(),
+                            },
+                            result: None,
+                            tx_da_size: 0,
+                            miner_fee: 0,
+                        },
+                        true,
+                    );
+                }
+                Err(err) => {
+                    // The transaction errored in speculative execution, however we cannot assume
+                    // that it will always error in a re-execution. For example, it could have hit a
+                    // nonce error due to stale reads, but in re-execution the nonce could be valid.
+
+                    // We store an error here, but if the transaction is re-executed later, the new result
+                    // will overwrite this one.
+                    debug!(
+                        target: "block_stm",
+                        txn_idx = txn_idx,
+                        incarnation = incarnation,
+                        error = %err,
+                        "Error executing transaction"
+                    );
+
+                    let read_set = tx_state.inner_mut().database.take_read_set();
+                    return (
+                        read_set,
+                        Default::default(),
+                        TxExecutionResult {
+                            tx,
+                            state: StateWithIncrements {
+                                loaded_state: EvmState::default(),
+                                pending_balance_increments: Default::default(),
+                            },
+                            result: None,
+                            tx_da_size: 0,
+                            miner_fee: 0,
+                        },
+                        false,
+                    );
+                }
+            }; // End match
+        } // End loop
+    }
+
+    pub fn execute_transactions_parallel<
+        ExecuteTxFn: (Fn(
+                &Recovered<op_alloy_consensus::OpTxEnvelope>,
+                &mut LazyDatabaseWrapper<State<VersionedDatabase<'_, DB>>>,
+                &HashSet<EvmStateKey>,
+                Option<&TxExecutionResult>,
+                u64,
+            ) -> Result<
+                ResultAndState<OpHaltReason, StateWithIncrements>,
+                EVMError<VersionedDbError, OpTransactionError>,
+            >) + Send
+            + Sync,
+    >(
+        &mut self,
+        base_fee: u64,
+        cancellation_token: CancellationToken,
+        execute_tx: ExecuteTxFn,
+        parent_span: Span,
+    ) {
+        let num_candidates = self.transactions.len();
+        let num_threads = self.num_threads.min(num_candidates);
+
+        let this = Arc::new(self);
+        let cancellation_token = Arc::new(cancellation_token);
+        let execute_tx = Arc::new(execute_tx);
+
+        thread::scope(|s: &thread::Scope<'_, '_>| {
+            for worker_id in 0..num_threads {
+                let this = Arc::clone(&this);
+                let cancellation_token = Arc::clone(&cancellation_token);
+                let execute_tx = Arc::clone(&execute_tx);
+                let worker_span = tracing::info_span!(
+                    parent: &parent_span,
+                    "block_stm_worker",
+                    worker_id = worker_id
+                );
+                s.spawn(move || {
+                    let _worker_guard = worker_span.entered();
+
+                    let mut task = None;
+
+                    while !this.scheduler.done() {
+                        let is_cancelled = cancellation_token.is_cancelled();
+
+                        // Finish validation tasks only if cancelled.
+                        if is_cancelled && !matches!(task, Some((Task::Validate { .. }, _))) {
+                            // first, see if we can get a validation task:
+                            task = this.scheduler.next_validation_task();
+
+                            // if we still don't have a task, we're done.
+                            if task.is_none() {
+                                break;
+                            }
+                        }
+
+                        task = if let Some((Task::Execute { version }, guard)) = task {
+                            let Version {
+                                txn_idx,
+                                incarnation,
+                            } = version;
+
+                            let tx_execute_span = tracing::info_span!(
+                                parent: Span::current(),
+                                "block_stm_tx_execute",
+                                txn_idx = txn_idx,
+                                incarnation = incarnation
+                            );
+                            let _tx_execute_guard = tx_execute_span.entered();
+
+                            debug!(
+                                worker_id = worker_id,
+                                txn_idx = txn_idx,
+                                incarnation = incarnation,
+                                "Starting execution task"
+                            );
+
+                            let (read_set, write_set, exec_result, aborted) = this.execute_single_tx(version, base_fee, &execute_tx);
+
+                            {
+                                let mut results = this.execution_results.lock().unwrap();
+                                results[txn_idx as usize] = Some(exec_result);
+                            }
+
+
+                            debug!(
+                                worker_id = worker_id,
+                                txn_idx = txn_idx,
+                                incarnation = incarnation,
+                                aborted = aborted,
+                                "Finished execution task"
+                            );
+                            if !aborted {
+                                debug!(
+                                    worker_id = worker_id,
+                                    txn_idx = txn_idx,
+                                    incarnation = incarnation,
+                                    "Finished execution task, committing writes"
+                                );
+                                let wrote_new_path = this.mv_hashmap.record(version, &read_set, &write_set);
+
+                                this
+                                    .scheduler
+                                    .finish_execution(txn_idx, incarnation, wrote_new_path, guard)
+                            } else {
+                                None
+                            }
+                        } else {
+                            task
+                        };
+                        task = if let Some((Task::Validate {
+                            version:
+                                Version {
+                                    txn_idx,
+                                    incarnation,
+                                },
+                        }, guard)) = task
+                        {
+                            let tx_validate_span = tracing::info_span!(
+                                parent: Span::current(),
+                                "block_stm_tx_validate",
+                                txn_idx = txn_idx,
+                                incarnation = incarnation
+                            );
+                            let _tx_validate_guard = tx_validate_span.entered();
+
+                            debug!(
+                                worker_id = worker_id,
+                                txn_idx = txn_idx,
+                                incarnation = incarnation,
+                                "Starting validation task"
+                            );
+
+                            let validation_result = this.mv_hashmap.validate_read_set_detailed(txn_idx);
+                            let read_set_valid = matches!(validation_result, ValidationResult::Valid);
+
+                            let aborted = !read_set_valid
+                                && this.scheduler.try_validation_abort(txn_idx, incarnation);
+
+                            if aborted {
+                                if let ValidationResult::Conflict {
+                                    key,
+                                    expected_versions,
+                                    actual_versions,
+                                } = validation_result
+                                {
+                                    debug!(
+                                        worker_id = worker_id,
+                                        txn_idx = txn_idx,
+                                        incarnation = incarnation,
+                                        key = %key,
+                                        expected_versions = ?expected_versions,
+                                        actual_versions = ?actual_versions,
+                                        "Block-STM conflict detected: transaction aborted due to stale read"
+                                    );
+                                }
+                                this.mv_hashmap.convert_writes_to_estimates(txn_idx);
+                            }
+
+                            let next_task = this.scheduler.finish_validation(txn_idx, aborted, guard);
+                            debug!(
+                                worker_id = worker_id,
+                                txn_idx = txn_idx,
+                                incarnation = incarnation,
+                                aborted = aborted,
+                                read_set_valid = read_set_valid,
+                                next_task = next_task.is_some(),
+                                next_task_incarnation = next_task.as_ref().map(|(t, _)| match t {
+                                    Task::Validate { version } | Task::Execute { version } => version.incarnation,
+                                }),
+                                "Finished validation task"
+                            );
+                            next_task
+                        } else {
+                            task
+                        };
+                        if task.is_none() {
+                            // Get next task from Block-STM scheduler
+                            task = this.scheduler.next_task();
+                            if task.is_none() {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                        }
+                    }
+
+                    debug!(
+                        worker_id = worker_id,
+                        scheduler_done = this.scheduler.done(),
+                        cancelled = cancellation_token.is_cancelled(),
+                        "Worker thread exiting"
+                    );
+                });
+            }
+        });
+    }
+
+    pub fn try_into_committed_results(
+        self,
+    ) -> Result<(Vec<TxExecutionResult>, SharedCodeCache), PayloadBuilderError> {
+        // Calculate the safe commit point: longest prefix of fully validated transactions.
+        // A transaction is safe to commit only if:
+        // 1. It has ExecutionStatus::Executed (not Aborting/ReadyToExecute/Executing)
+        // 2. Validation has passed this transaction (validation_idx > i)
+        // Note: validation_idx indicates how far validation has progressed, not just how far
+        // execution has progressed.
+        let validation_idx = self.scheduler.validation_idx();
+        let safe_commit_point = (0..self.scheduler.num_txns())
+            .take_while(|&i| {
+                self.scheduler.get_status(i as u32) == ExecutionStatus::Executed
+                    && validation_idx > i
+            })
+            .count();
+
+        // Commit phase: apply results in order
+        let results = Arc::try_unwrap(self.execution_results)
+            .map_err(|_| PayloadBuilderError::Other("Failed to unwrap execution results".into()))?
+            .into_inner()
+            .unwrap();
+
+        Ok((
+            results
+                .into_iter()
+                .take(safe_commit_point)
+                .flatten()
+                .collect(),
+            self.shared_code_cache,
+        ))
+    }
+}

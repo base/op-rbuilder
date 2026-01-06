@@ -130,6 +130,10 @@ pub struct BuilderConfig<Specific: Clone> {
 
     /// Unified transaction data store (backrun bundles + resource metering)
     pub tx_data_store: TxDataStore,
+
+    /// Number of parallel threads for transaction execution.
+    /// Defaults to the number of available CPU cores.
+    pub parallel_threads: usize,
 }
 
 impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
@@ -153,6 +157,7 @@ impl<S: Debug + Clone> core::fmt::Debug for BuilderConfig<S> {
             .field("max_gas_per_txn", &self.max_gas_per_txn)
             .field("gas_limiter_config", &self.gas_limiter_config)
             .field("tx_data_store", &self.tx_data_store)
+            .field("parallel_threads", &self.parallel_threads)
             .finish()
     }
 }
@@ -172,6 +177,9 @@ impl<S: Default + Clone> Default for BuilderConfig<S> {
             max_gas_per_txn: None,
             gas_limiter_config: GasLimiterArgs::default(),
             tx_data_store: TxDataStore::default(),
+            parallel_threads: std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4),
         }
     }
 }
@@ -198,6 +206,11 @@ where
                 args.enable_resource_metering,
                 args.tx_data_store_buffer_size,
             ),
+            parallel_threads: args.parallel_threads.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(4)
+            }),
             specific: S::try_from(args)?,
         })
     }
