@@ -29,7 +29,7 @@ use reth_optimism_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
-use reth_optimism_primitives::{OpPrimitives, OpReceipt, OpTransactionSigned};
+use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{
@@ -942,7 +942,7 @@ where
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FlashblocksMetadata {
-    receipts: HashMap<B256, <OpPrimitives as NodePrimitives>::Receipt>,
+    receipts: Option<HashMap<B256, <OpPrimitives as NodePrimitives>::Receipt>>,
     new_account_balances: HashMap<Address, U256>,
     block_number: u64,
 }
@@ -1134,13 +1134,7 @@ where
         .map(|tx| tx.encoded_2718().into())
         .collect::<Vec<_>>();
 
-    let new_receipts = info.receipts[info.extra.last_flashblock_index..].to_vec();
     info.extra.last_flashblock_index = info.executed_transactions.len();
-    let receipts_with_hash = new_transactions
-        .iter()
-        .zip(new_receipts.iter())
-        .map(|(tx, receipt)| (tx.tx_hash(), receipt.clone()))
-        .collect::<HashMap<B256, OpReceipt>>();
     let new_account_balances = state
         .bundle_state
         .state
@@ -1149,7 +1143,7 @@ where
         .collect::<HashMap<Address, U256>>();
 
     let metadata: FlashblocksMetadata = FlashblocksMetadata {
-        receipts: receipts_with_hash,
+        receipts: None,
         new_account_balances,
         block_number: ctx.parent().number + 1,
     };
