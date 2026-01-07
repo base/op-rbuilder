@@ -3,13 +3,14 @@
 //! This is based on the reference `op_revm::OpEvm` but lives in this crate
 //! to allow customization of the execution process.
 
+use super::EthFrame;
 use op_revm::precompiles::OpPrecompiles;
 use revm::{
     Database, Inspector,
     context::{ContextError, ContextSetters, Evm, FrameStack},
     context_interface::ContextTr,
     handler::{
-        EthFrame, EvmTr, FrameInitOrResult, ItemOrResult, PrecompileProvider,
+        EvmTr, FrameInitOrResult, ItemOrResult, PrecompileProvider,
         evm::FrameTr,
         instructions::{EthInstructions, InstructionProvider},
     },

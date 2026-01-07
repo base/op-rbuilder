@@ -105,6 +105,7 @@ async-trait = { workspace = true }
 clap_builder = { workspace = true }
 clap.workspace = true
 derive_more.workspace = true
+derive-where = { version = "1.6.0", default-features = false }
 either.workspace = true
 metrics.workspace = true
 serde_json.workspace = true

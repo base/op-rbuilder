@@ -7115,6 +7115,7 @@ dependencies = [
  "concurrent-queue",
  "ctor",
  "dashmap 6.1.0",
+ "derive-where",
  "derive_more",
  "dirs-next",
  "either",

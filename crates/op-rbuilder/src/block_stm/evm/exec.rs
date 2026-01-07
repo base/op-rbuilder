@@ -5,7 +5,7 @@
 
 use crate::block_stm::evm::handler::LazyOpContextTr;
 
-use super::{custom_evm::OpLazyEvmInner, handler::LazyRevmHandler};
+use super::{custom_evm::OpLazyEvmInner, handler::LazyRevmHandler, EthFrame};
 use op_revm::{OpHaltReason, transaction::OpTransactionError};
 use revm::{
     DatabaseCommit, ExecuteCommitEvm, ExecuteEvm,
@@ -15,7 +15,7 @@ use revm::{
         result::{EVMError, ExecutionResult},
     },
     handler::{
-        EthFrame, Handler, PrecompileProvider, SystemCallTx, instructions::EthInstructions,
+        Handler, PrecompileProvider, SystemCallTx, instructions::EthInstructions,
         system_call::SystemCallEvm,
     },
     inspector::{
