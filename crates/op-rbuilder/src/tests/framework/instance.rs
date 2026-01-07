@@ -448,24 +448,23 @@ impl FlashblocksListener {
 
     /// Check if any flashblock contains the given transaction hash
     pub fn contains_transaction(&self, tx_hash: &B256) -> bool {
-        let tx_hash_str = format!("{tx_hash:#x}");
         self.flashblocks.lock().iter().any(|fb| {
-            if let Some(receipts) = fb.metadata.get("receipts")
-                && let Some(receipts_obj) = receipts.as_object()
-            {
-                return receipts_obj.contains_key(&tx_hash_str);
-            }
-            false
+            fb.diff
+                .transactions
+                .iter()
+                .any(|tx| keccak256(tx) == *tx_hash)
         })
     }
 
     /// Find which flashblock index contains the given transaction hash
     pub fn find_transaction_flashblock(&self, tx_hash: &B256) -> Option<u64> {
-        let tx_hash_str = format!("{tx_hash:#x}");
         self.flashblocks.lock().iter().find_map(|fb| {
-            if let Some(receipts) = fb.metadata.get("receipts")
-                && let Some(receipts_obj) = receipts.as_object()
-                && receipts_obj.contains_key(&tx_hash_str)
+            if fb
+                .diff
+                .transactions
+                .iter()
+                .find(|tx| keccak256(tx) == *tx_hash)
+                .is_some()
             {
                 return Some(fb.index);
             }
