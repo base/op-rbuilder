@@ -17,7 +17,7 @@ use revm::{
         result::{ExecutionResult, FromStringError},
     },
     handler::{
-        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
+        EvmTr, FrameResult, Handler, MainnetHandler,
         evm::FrameTr,
         handler::EvmTrError,
         post_execution::{self, reimburse_caller},
@@ -30,7 +30,7 @@ use revm::{
 };
 use std::boxed::Box;
 
-use crate::block_stm::evm::LazyDatabase;
+use crate::block_stm::evm::{EthFrame, LazyDatabase};
 
 /// Custom Optimism handler that extends the [`Handler`] with Optimism-specific logic.
 ///

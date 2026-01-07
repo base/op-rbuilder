@@ -19,12 +19,14 @@ use revm::{
 mod custom_evm;
 mod custom_precompiles;
 mod exec;
+mod frame;
 mod handler;
 mod lazy_db;
 mod weth_precompile;
 
 pub use custom_evm::OpLazyEvmInner;
 pub use custom_precompiles::OpCustomPrecompiles;
+pub use frame::{EthFrame, return_create};
 pub use handler::LazyRevmHandler;
 pub use lazy_db::{LazyDatabase, LazyDatabaseWrapper};
 pub use weth_precompile::WETH_ADDRESS;
