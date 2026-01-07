@@ -6,9 +6,7 @@ use alloy_primitives::{Address, Bytes};
 use core::ops::{Deref, DerefMut};
 use op_revm::{
     DefaultOp, OpBuilder, OpContext, OpHaltReason, OpSpecId, OpTransaction, OpTransactionError,
-    precompiles::OpPrecompiles,
 };
-use reth_evm::precompiles::PrecompilesMap;
 use revm::{
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
     context::{BlockEnv, TxEnv},
@@ -19,13 +17,17 @@ use revm::{
 };
 
 mod custom_evm;
+mod custom_precompiles;
 mod exec;
 mod handler;
 mod lazy_db;
+mod weth_precompile;
 
 pub use custom_evm::OpLazyEvmInner;
+pub use custom_precompiles::OpCustomPrecompiles;
 pub use handler::LazyRevmHandler;
 pub use lazy_db::{LazyDatabase, LazyDatabaseWrapper};
+pub use weth_precompile::WETH_ADDRESS;
 
 /// OP EVM implementation.
 ///
@@ -163,7 +165,7 @@ impl OpLazyEvmFactory {
         &self,
         db: DB,
         input: EvmEnv<OpSpecId>,
-    ) -> OpLazyEvm<DB, NoOpInspector, PrecompilesMap> {
+    ) -> OpLazyEvm<DB, NoOpInspector, OpCustomPrecompiles> {
         let spec_id = input.cfg_env.spec;
         // Build the base EVM using the op_revm builder, then wrap in our custom type
         let base_evm = Context::op()
@@ -171,9 +173,7 @@ impl OpLazyEvmFactory {
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
             .build_op_with_inspector(NoOpInspector {})
-            .with_precompiles(PrecompilesMap::from_static(
-                OpPrecompiles::new_with_spec(spec_id).precompiles(),
-            ));
+            .with_precompiles(OpCustomPrecompiles::new_with_spec(spec_id));
         // Convert op_revm::OpEvm to our custom OpLazyEvmInner
         OpLazyEvm::new(OpLazyEvmInner(base_evm.0), false)
     }
@@ -183,7 +183,7 @@ impl OpLazyEvmFactory {
         db: DB,
         input: EvmEnv<OpSpecId>,
         inspector: I,
-    ) -> OpLazyEvm<DB, I, PrecompilesMap> {
+    ) -> OpLazyEvm<DB, I, OpCustomPrecompiles> {
         let spec_id = input.cfg_env.spec;
         // Build the base EVM using the op_revm builder, then wrap in our custom type
         let base_evm = Context::op()
@@ -191,9 +191,7 @@ impl OpLazyEvmFactory {
             .with_block(input.block_env)
             .with_cfg(input.cfg_env)
             .build_op_with_inspector(inspector)
-            .with_precompiles(PrecompilesMap::from_static(
-                OpPrecompiles::new_with_spec(spec_id).precompiles(),
-            ));
+            .with_precompiles(OpCustomPrecompiles::new_with_spec(spec_id));
         // Convert op_revm::OpEvm to our custom OpLazyEvmInner
         OpLazyEvm::new(OpLazyEvmInner(base_evm.0), true)
     }
