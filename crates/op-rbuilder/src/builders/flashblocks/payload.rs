@@ -16,7 +16,7 @@ use alloy_consensus::{
     BlockBody, EMPTY_OMMER_ROOT_HASH, Header, constants::EMPTY_WITHDRAWALS, proofs,
 };
 use alloy_eips::{Encodable2718, eip7685::EMPTY_REQUESTS_HASH, merge::BEACON_NONCE};
-use alloy_primitives::{Address, B256, U256, map::foldhash::HashMap};
+use alloy_primitives::{B256, U256};
 use core::time::Duration;
 use eyre::WrapErr as _;
 use reth::payload::PayloadBuilderAttributes;
@@ -24,12 +24,12 @@ use reth_basic_payload_builder::BuildOutcome;
 use reth_chain_state::ExecutedBlock;
 use reth_chainspec::EthChainSpec;
 use reth_evm::{ConfigureEvm, execute::BlockBuilder};
-use reth_node_api::{Block, NodePrimitives, PayloadBuilderError};
+use reth_node_api::{Block, PayloadBuilderError};
 use reth_optimism_consensus::{calculate_receipt_root_no_memo_optimism, isthmus};
 use reth_optimism_evm::{OpEvmConfig, OpNextBlockEnvAttributes};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_node::{OpBuiltPayload, OpPayloadBuilderAttributes};
-use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
+use reth_optimism_primitives::OpTransactionSigned;
 use reth_payload_util::BestPayloadTransactions;
 use reth_primitives_traits::RecoveredBlock;
 use reth_provider::{
@@ -942,8 +942,6 @@ where
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FlashblocksMetadata {
-    receipts: Option<HashMap<B256, <OpPrimitives as NodePrimitives>::Receipt>>,
-    new_account_balances: HashMap<Address, U256>,
     block_number: u64,
 }
 
@@ -1135,16 +1133,8 @@ where
         .collect::<Vec<_>>();
 
     info.extra.last_flashblock_index = info.executed_transactions.len();
-    let new_account_balances = state
-        .bundle_state
-        .state
-        .iter()
-        .filter_map(|(address, account)| account.info.as_ref().map(|info| (*address, info.balance)))
-        .collect::<HashMap<Address, U256>>();
 
     let metadata: FlashblocksMetadata = FlashblocksMetadata {
-        receipts: None,
-        new_account_balances,
         block_number: ctx.parent().number + 1,
     };
 
