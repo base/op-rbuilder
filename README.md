@@ -44,7 +44,7 @@ cargo run -p op-rbuilder --bin op-rbuilder -- node \
 
 #### Flashblocks Number Contract
 
-To enable builder tranctions to the [flashblocks number contract](https://github.com/Uniswap/flashblocks_number_contract) for contracts to integrate with flashblocks onchain, specify the address in the CLI args:
+To enable builder transactions to the [flashblocks number contract](https://github.com/Uniswap/flashblocks_number_contract) for contracts to integrate with flashblocks onchain, specify the address in the CLI args:
 
 ```bash
 cargo run -p op-rbuilder --bin op-rbuilder -- node \
@@ -200,7 +200,7 @@ sudo rm -rf ~/.playground
 
 ## Running GitHub actions locally
 
-To verify that CI will allow your PR to be merged before sending it please make sure that our GitHub `checks.yaml` action passes locall by calling:
+To verify that CI will allow your PR to be merged before sending it please make sure that our GitHub `checks.yaml` action passes locally by calling:
 
 ```
 act -W .github/workflows/checks.yaml
