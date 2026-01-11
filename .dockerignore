@@ -1,14 +1,42 @@
-/cargo
-/data
-/mev-test-contract/cache
-/mev-test-contract/out
-/target
-/scripts/benchmark-results.*
-/test/
-/integration_logs
-Dockerfile
+# Git
+.git/
+.github/
+.gitignore
+.gitmodules
 
-# editors
-.code
-.idea
-.vscode
+# Build artifacts
+/target/
+/cargo/
+/data/
+/test/
+/integration_logs/
+genesis.json
+/op-reth
+/scripts/benchmark-results.*
+
+# IDE/Editors
+.code/
+.idea/
+.vscode/
+.DS_Store
+.editorconfig
+
+# Documentation
+*.md
+docs/
+CODEOWNERS
+
+# CI/Dev tools
+justfile
+Makefile
+zepter.yaml
+rustfmt.toml
+rust-toolchain.toml
+
+# Environment
+.env
+
+# Misc
+/mev-test-contract/cache/
+/mev-test-contract/out/
+.dockerignore
