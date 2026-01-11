@@ -163,18 +163,29 @@ async fn attest_handler(
 }
 
 async fn shutdown_signal() {
-    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
-    let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt()).unwrap();
+    #[cfg(unix)]
+    {
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())
+            .expect("failed to install SIGINT handler");
 
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down gracefully");
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down gracefully");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down gracefully");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down gracefully");
+            }
         }
-        _ = sigterm.recv() => {
-            info!("Received SIGTERM, shutting down gracefully");
-        }
-        _ = sigint.recv() => {
-            info!("Received SIGINT, shutting down gracefully");
-        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = signal::ctrl_c().await;
+        info!("Received Ctrl+C, shutting down gracefully");
     }
 }
